@@ -80,13 +80,6 @@ def msd_datasets_and_loaders(
     cases = TRAIN_CASES
 
     data_dicts = []
-    ds = DecathlonDataset(
-        root_dir=DATA_ROOT, 
-        task="Task01_BrainTumour", 
-        section="training", 
-        download=True,
-        cache_num=0,
-    )
 
     # msd
     # training data
@@ -713,7 +706,7 @@ if __name__ == "__main__":
 
     num_epochs = 3
 
-    """# Stage A - Unet training
+    # Stage A - Unet training
     trainer = SemanticSegTrainer(
         model = unet_model,
         train_loader = train_loader,
@@ -725,7 +718,7 @@ if __name__ == "__main__":
     trainer.fit(num_epochs = num_epochs)
     unet_pt = pt_loader("checkpoints/unet_stageA.pt")
 
-    print(f"Stage A done: {unet_pt.keys()}")"""
+    print(f"Stage A done: {unet_pt.keys()}")
     print(f"Stage B start")
 
     # Stage B - triage training
