@@ -707,7 +707,7 @@ if __name__ == "__main__":
 
     num_epochs = 3
 
-    # Stage A - Unet training
+    """# Stage A - Unet training
     trainer = SemanticSegTrainer(
         model = unet_model,
         train_loader = train_loader,
@@ -719,7 +719,7 @@ if __name__ == "__main__":
     trainer.fit(num_epochs = num_epochs)
     unet_pt = pt_loader("checkpoints/unet_stageA.pt")
 
-    print(f"Stage A done: {unet_pt.keys()}")
+    print(f"Stage A done: {unet_pt.keys()}")"""
     print(f"Stage B start")
 
     # Stage B - triage training
