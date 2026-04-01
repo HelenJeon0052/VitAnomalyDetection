@@ -46,4 +46,4 @@ class ODEInterateRK(nn.Module):
 def ode_integrate_rk(vf: nn.Module, x0: torch.Tensor, t_0=0.0, t_1=1.0, steps=10):
     solver = ODEInterateRK(vf)
 
-    return solver(x0, grid_shape, t_0=0.0, t_1=1.0, steps=10)
+    return solver(x0, grid_shape, t_0=0.0, t_1=1.0, steps=20)

@@ -13,29 +13,31 @@ import torch.nn.functional as F
 from typing import Tuple
 
 class AttentionField3D(nn.Module):
-    def __init__(self, dim: int, num_heads: int=6, sr_ratio: float=1.0, dropout:float=0.0, attn_drop:float=0.0):
+    def __init__(self, dim: int, num_heads: int=6, dropout:float=0.0, sr_ratio: float=1.0, attn_drop:float=0.0):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         self.attn = SRMultiheadAttention3D(dim, num_heads = num_heads, sr_ratio=sr_ratio, attn_drop = attn_drop, proj_drop = dropout)
 
-    def forward(self, u: torch.Tensor, grid_shape: Tuple[int, int, int]):
-        return self.attn(self.norm(u), grid_shape)
+    def forward(self, t, u: torch.Tensor, grid_shape: Tuple[int, int, int]=None):
+        x = self.norm(u)
+        out = self.attn(x, grid_shape)
+        return out
 
 class MLP(nn.Module):
-    def __init__(self, dim, mlp_ratio=3.5, drop=0.0):
+    def __init__(self, dim, mlp_ratio=3.5, dropout=0.0):
         super().__init__()
         l = int(dim * mlp_ratio)
         self.fc1 = nn.Linear(dim, l)
         self.fc2 = nn.Linear(l, dim)
-        self.drop = nn.Dropout(drop)
+        self.dropout = nn.Dropout(dropout)
         self.act = nn.GELU()
 
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
-        x = self.drop(x)
+        x = self.dropout(x)
         x = self.fc2(x)
-        x = self.drop(x)
+        x = self.dropout(x)
 
         return x
 
@@ -103,11 +105,11 @@ class AttentionMLP(nn.Module):
         return y
 
 class MLPField(nn.Module):
-    def __init__(self, dim: int, mlp_ratio:float=3.0, dropout:float=0.0):
+    def __init__(self, dim: int, mlp_ratio:float=3.5, dropout:float=0.0):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, mlp_ratio, dropout)
-    def forward(self, u: torch.Tensor):
+        self.mlp = MLP(dim, mlp_ratio, dropout=dropout)
+    def forward(self, t, u: torch.Tensor, grid_shape=None):
         return self.mlp(self.norm(u))
 
 class FrictionField(nn.Module):

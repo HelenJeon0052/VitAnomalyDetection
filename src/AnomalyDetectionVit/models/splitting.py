@@ -78,19 +78,18 @@ class SplitODEBlock(nn.Module):
             return x
 
         # Strang :  attn(h/2) > (optional fric) > mlp(h) > attn(h/2)
+        if self.mode == "strang":
+            x = self._flow(self.attn, x, grid_shape, t_0, mid, max(1, self.steps_attn // 2))
 
-        if self.friction_position == 'pre' :
-            x = apply_fric(x, grid_shape)
-            
-        x = self._flow(self.attn, x, grid_shape, t_0, mid, max(1, self.steps_attn //2))
+            if self.friction_position == 'mid':
+               x = apply_fric(x, grid_shape)
 
-        if self.friction_position == 'mid':
-            x = apply_fric(x, grid_shape)
+            x = self._flow(self.mlp, x, grid_shape, t_0, t_1, self.steps_mlp)
+            x = self._flow(self.attn, x, grid_shape, mid, t_1, max(1, self.steps_attn//2))
 
-        x = self._flow(self.mlp, x, grid_shape, t_0, t_1, self.steps_mlp)
-        x = self._flow(self.attn, x, grid_shape, mid, t_1, max(1, self.steps_attn//2))
+            if self.friction_position == 'post':
+              x = apply_fric(x, grid_shape)
+            elif self.friction_position == 'pre':
+              x = apply_fric(x, grid_shape)
 
-        if self.friction_position == 'post':
-            x = apply_fric(x, grid_shape)
-
-        return x
+            return x

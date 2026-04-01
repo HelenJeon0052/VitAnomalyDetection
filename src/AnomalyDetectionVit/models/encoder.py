@@ -59,13 +59,13 @@ class HierarchicalEncoder3D(nn.Module):
             stage_blocks = nn.ModuleList()
 
             
-            stage_blocks.append(AttentionMLP(dim, 1 << i, sr))
+            # stage_blocks.append(AttentionMLP(dim, 1 << i, sr))
 
             for _ in range(dth):
                 if block_type == 'sr':
                     stage_blocks.append(SRtransformerBlock3D(dim, num_heads=hd, sr_ratio=sr, mlp_ratio=mlp_ratio, dropout=dropout, attn_drop=attn_drop))
                 else:
-                    attn_field = AttentionField3D(dim, num_heads=hd, sr_ratio=sr, dropout=dropout, attn_drop=attn_drop)
+                    attn_field = AttentionField3D(dim, num_heads=hd, dropout=dropout)
                     mlp_field = MLPField(dim, mlp_ratio=mlp_ratio, dropout=dropout)
                     fric_field = FrictionField(dim)
                     stage_blocks.append(
@@ -78,13 +78,13 @@ class HierarchicalEncoder3D(nn.Module):
                             steps_fric=ode_steps_fric,
                             use_friction=use_friction,
                             friction_position=friction_position,
-                            ode_mode="strang",
+                            ode_mode=ode_mode,
                         )
                     )
             self.stages.append(stage_blocks)
 
             if i < self.num_stages -1 :
-                self.downs.append(PatchMerging3D(embed_dim[i], embed_dim[i+1]))
+                self.downs.append(PatchMerging3D(embed_dim[i], embed_dim[i + 1]))
 
     def _tokens_to_feat(self, tok, grid, has_cls=False):
         B, N, C = tok.shape
@@ -94,7 +94,7 @@ class HierarchicalEncoder3D(nn.Module):
             if N < 2:
                 raise ValueError(f'token count N = {N},if has cls is True, it requires more tokens')
             tok = tok[:, 1:, :]
-            N = N -1
+            N = N - 1
         
         print("expected:", (grid[0]*grid[1]*grid[2]))
         assert N == D * L * W, (f'Token count mismatch: {N}, {grid} equivalent to {D*L*W}')
@@ -120,7 +120,7 @@ class HierarchicalEncoder3D(nn.Module):
 
         for i, stage_blocks in enumerate(self.stages):
             if i > 0:
-                print(f"before downs[{i-1}]:", feat.shape)
+                # print(f"before downs[{i - 1}]:", feat.shape)
                 down = self.downs[i - 1](feat)
 
                 if isinstance(down, (tuple, list)) and len(down) == 3:
@@ -131,10 +131,15 @@ class HierarchicalEncoder3D(nn.Module):
                 else:
                     raise ValueError("PatchMerging must return (tok, grid, feat) or (tok, grid)")
 
-                print(f"after downs[{i-1}]:", feat.shape, "grid:", grid)
+                print(f"after downs[{i - 1}]:", feat.shape, "grid:", grid)
 
             for blk in stage_blocks:
-                tok = blk(tok, grid)
+                if isinstance(blk, (AttentionField3D, MLPField, FrictionField)):
+                    tok = blk(0.0, tok, blk)
+                elif isinstance(blk, (SplitODEBlock, SRTransformerBlock3D)):
+                    tok = blk(tok, blk)
+                else:
+                    tok = blk(tok, grid)
 
             feat = self._tokens_to_feat(tok, grid, self.has_cls_token)
             print(f"after stage[{i}]:", feat.shape, "grid:", grid)

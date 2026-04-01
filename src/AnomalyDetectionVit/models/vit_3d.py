@@ -82,6 +82,16 @@ class Light3DVit(nn.Module):
 
     def _pool3d(self, f4: torch.Tensor) ->  torch.Tensor:
         print(f"shapes in _pool3d: {f4}")
+        
+        if isinstance(f4, (list, tuple)):
+            raise TypeError(f"Expected a single tensor for f4, but got {type(f4)}")
+        
+        if not torch.is_tensor(f4):
+            raise TypeError(f"Expected a tensor for f4, got {type(f4)}")
+        
+        if f4.ndim != 5:
+            raise ValueError(f"Expected f4 to have 5 dimensions (B, C, D, H, W), but got {f4.ndim} dimensions")
+        
         if self.triage_pool == 'gap':
             return f4.mean(dim=(2, 3, 4))
         if self.triage_pool == 'gmp':
@@ -89,9 +99,8 @@ class Light3DVit(nn.Module):
         raise ValueError(f'Unknown triage_pool: {self.triage_pool}')
 
     def forward(self, x):
-        feats = self.encoder(x)
-        f4 = feats[-1]
+        feat_last, feats = self.encoder(x)
 
-        pooled = self._pool3d(f4)
+        pooled = self._pool3d(feats[-1])
         
         return self.triage_head(pooled)
