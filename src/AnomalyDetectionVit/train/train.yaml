@@ -1,0 +1,40 @@
+model:
+  name: Light3DVit
+  in_channel: 4
+  num_classes: 3
+  embed_dims: [48, 96, 192, 384]
+  depths: [2, 2, 2, 2]
+  sr_ratios: [4, 2, 2, 1]
+  patch_size: 4
+
+ablation:
+  - name: sr_baseline
+    overrides:
+      model : {block_type:sr}
+  - name: ode_strang
+    overrides:
+      model:
+        block_type: ode
+        ode_mode: strang
+        ode_steps_attn: 2
+        ode_steps_mlp: 1
+        ode_stpes_fric: 1
+        use_friction: true
+        friction_position: mid
+
+  - name: ode_lie
+    overrides:
+      model:
+        block_type: ode
+        ode_mode: lie
+        ode_steps_attn: 2
+        ode_steps_mlp: 1
+        ode_steps_fric: 1
+        use_friction: true
+        friction_position: pre
+
+train:
+  steps: 1000
+  scheduler: warmup_cosine
+  warmup_steps: 100
+  min_lr_ratio: 0.05

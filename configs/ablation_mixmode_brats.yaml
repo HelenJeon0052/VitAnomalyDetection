@@ -1,0 +1,81 @@
+experiment:
+  seed: 42
+  tag: "ablation_mixmode_brats"
+  out_dir: "./runs/ablation_mixmode_brats"
+
+
+base:
+  model:
+    mix_mode: "nosplit"
+    nosplit_steps: 8
+    use_friction: false
+    friction_position: null
+    steps_attn: null
+    steps:mlp: null
+    steps_fric: 0
+
+  train:
+    epochs: 30
+    lr: 1.0e-4
+    weight_decay: 1.0e-2
+
+  data:
+    dataset: "msd"
+    patch_size: 4
+    roi_size: [96, 96, 96]
+    batch_size: 1
+    num_workers: 2
+
+sweep:
+  # No-split ODE
+  - name: "nosplit_steps8_fric_on"
+    overrides:
+      model:
+        mix_mode: "nosplit"
+        nosplit_steps: 8
+        use_friction: true
+
+  # Lie-Trotter splitting (first order)
+  # Fric > Attn > Mlp
+  - name: "lie_attn6_mlp2_fric0"
+    overrides:
+      model:
+        mix_mode: "lie"
+        steps_attn: 6
+        steps_mlp: 2
+        steps_fric: 0
+        use_friction: false
+        friction_position: null
+  
+  - name: "lie_attn6_mlp2_fric1_pre"
+    overrides:
+      model:
+        mix_mode: "lie"
+        steps_attn: 6
+        steps_mlp: 2
+        steps_fric: 1
+        use_friction: true
+        friction_position: "pre"
+
+  # Strang splittingn (second order)
+  # Attn/2 > (Fric) > Mlp > Attn/2
+  - name: "strang_attn6_mlp2_fric0"
+    overrides:
+      model:
+        mix_mode: "strang"
+        steps_attn: 6
+        steps_mlp: 2
+        steps_fric: 0
+        use_friction: false
+        friction_position: null
+
+  - name: "strang_attn6_mlp2_fric1_mid"
+    overrides:
+      model:
+        mix_mode: "strang"
+        steps_attn: 6
+        steps_mlp: 2
+        steps_fric: 1
+        use_friction: true
+        friction_position: "mid"
+
