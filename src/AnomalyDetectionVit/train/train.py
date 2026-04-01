@@ -65,7 +65,7 @@ def msd_datasets_and_loaders(
     debug = True,
 ):
     set_determinism(seed=42)
-
+    
     random.seed(seed)
 
     torch.manual_seed(seed)
@@ -80,7 +80,13 @@ def msd_datasets_and_loaders(
     cases = TRAIN_CASES
 
     data_dicts = []
-
+    ds = DecathlonDataset(
+        root_dir=DATA_ROOT, 
+        task="Task01_BrainTumour", 
+        section="training", 
+        download=True,
+        cache_num=0,
+    )
 
     # msd
     # training data
