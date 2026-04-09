@@ -135,9 +135,9 @@ class HierarchicalEncoder3D(nn.Module):
 
             for blk in stage_blocks:
                 if isinstance(blk, (AttentionField3D, MLPField, FrictionField)):
-                    tok = blk(0.0, tok, blk)
-                elif isinstance(blk, (SplitODEBlock, SRTransformerBlock3D)):
-                    tok = blk(tok, blk)
+                    tok = blk(0.0, tok)
+                elif isinstance(blk, (SplitODEBlock, SRtransformerBlock3D)):
+                    tok = blk(tok, grid)
                 else:
                     tok = blk(tok, grid)
 

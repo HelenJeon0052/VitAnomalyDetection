@@ -52,7 +52,7 @@ class SplitODEBlock(nn.Module):
             return x
         return self._flow(self.fric, x, grid_shape, self.steps_fric, t_0=0.0, t_1=1.0)"""
 
-    def forward(self, x, grid_shape,):
+    def forward(self, x, grid_shape):
         t_0, t_1 = self.t_0, self.t_1
         mid = 0.5 * (t_0 + t_1)
 

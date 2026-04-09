@@ -24,16 +24,16 @@ class ViT3DPatchEmbed(nn.Module):
         x = self.proj(x)
         print("input.dtype:", x.shape)
         B, C, Dd, Ll, Ww = x.shape
-        tokens = x.flatten(2).transpose(1, 2) # [B, T, C]
-        print("input.dtype:", tokens.shape)
+        x = x.flatten(2).transpose(1, 2) # [B, T, C]
+        print("input.dtype:", x.shape)
 
-        return tokens, (Dd, Ll, Ww), x
+        return x, (Dd, Ll, Ww)
 
 class PatchMerging3D(nn.Module):
     """
     Downsample by 2
     Increase channels
-    stride = 2 > why?
+    stride = 2 
     """
     def __init__(self, in_dim, out_dim):
         super().__init__()

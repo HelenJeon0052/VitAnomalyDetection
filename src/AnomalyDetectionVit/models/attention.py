@@ -149,7 +149,7 @@ class SRMultiheadAttention3D(nn.Module):
         self.q = nn.Linear(dim, dim, bias=True)
         self.kv = nn.Linear(dim, dim*2, bias=True)
 
-        if self.sr_ratio > 1:
+        if self.sr_ratio > 1.0:
             self.sr = nn.Conv3d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio, bias=False)
             self.sr_norm = nn.LayerNorm(dim)
 
@@ -165,7 +165,7 @@ class SRMultiheadAttention3D(nn.Module):
         q = self.q(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         print(f'q.shape: {q.shape}')
 
-        if self.sr_ratio > 1:
+        if self.sr_ratio > 1.0:
             # reshape tokens back to 3D feature map
             feat = x.transpose(1, 2).reshape(B, C, Dd, Ll, Ww)
             feat = self.sr(feat)
