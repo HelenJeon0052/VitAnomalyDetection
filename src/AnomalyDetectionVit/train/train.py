@@ -20,9 +20,10 @@ from torch.amp import autocast, GradScaler
 
 from tqdm import tqdm
 from pathlib import Path
+from sklearn.metrics import roc_auc_score
 
+import pandas as pd
 import nibabel as nib
-from AnomalyDetectionVit.models.vit_3d import Light3DVit
 
 
 # monai
@@ -33,16 +34,18 @@ from monai.transforms import (
 )
 
 from monai.apps import DecathlonDataset
-from monai.data import DataLoader, PersistentDataset, CacheDataset, load_decathlon_datalist
+from monai.data import DataLoader, PersistentDataset, CacheDataset, load_decathlon_datalist, check_missing_files
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
 from monai.inferers import SlidingWindowInferer
 from monai.utils import set_determinism
 
-from AnomalyDetectionVit.models.unet3d import SyntheticBlobs3D, dice_score, seed_everything, soft_dice_loss, UNet3D
+
 from AnomalyDetectionVit.models.vit_3d import Light3DVit
-from AnomalyDetectionVit.utils.ckpt_util import save_ckpt, load_ckpt, pt_loader
-from AnomalyDetectionVit.utils.stage_util import load_unet_stageA
+from AnomalyDetectionVit.models.unet3d import SyntheticBlobs3D, dice_score, seed_everything, soft_dice_loss, UNet3D
+from AnomalyDetectionVit.utils.ckpt_util import save_ckpt_basic, load_ckpt_basic, save_ckpt_keyed, load_ckpt_keyed, pt_loader
+from AnomalyDetectionVit.utils.util import create_ablation_dataframe
+from AnomalyDetectionVit.utils.metric_util import compute_epoch_binary_metrics
 from AnomalyDetectionVit.scheduler.lr import make_warmup_cosine_scheduler
 
 
@@ -71,7 +74,7 @@ def msd_datasets_and_loaders(
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     
-    root_dir = Path("../dataset/msd")
+    root_dir = Path("../dataset/msd/Task01_BrainTumour")
     root_dir.mkdir(parents=True, exist_ok=True)
 
     DATA_ROOT = "../dataset/msd"
@@ -83,6 +86,9 @@ def msd_datasets_and_loaders(
 
     # msd
     # training data
+
+    # ds = DecathlonDataset(root_dir=root_dir, task="Task01_BrainTumour", section="training", download=True, transform=None)
+
     train_data_list = load_decathlon_datalist(json_path, is_segmentation=True, data_list_key="training")
     print(f"train_data_list: {len(train_data_list)}")
 
@@ -94,9 +100,17 @@ def msd_datasets_and_loaders(
         img = nib.load("../dataset/msd/Task01_BrainTumour/imagesTr/BRATS_442.nii.gz")
         
         print(img.shape)
-        print(train_data_list[0])
-        # {'image': 'imagesTr/BRATS_001.nii.gz', 'label': 'labelsTr/BRATS_001.nii.gz'}
 
+        print("loaded training items:", len(train_data_list))
+
+        
+        
+        print(train_data_list[0])
+        # {'image': 'imagesTr/BRATS_001.nii.gz', 'label': 'labelsTr/BRATS_001.nii.gz'}  
+
+        missing = check_missing_files(train_data_list, keys=("image", "label"))
+        print("num missing files:", len(missing))
+        print("sample missing:", missing[:10])
         files = train_data_list.copy()
         random.shuffle(files)
 
@@ -373,6 +387,7 @@ def build_default_hybrid(unet:nn.Module, unet_feat_channels: int, triage_embed_d
 
 
 class SemanticSegTrainer:
+    ckpt_model_attr = "train_model"
     def __init__(self, model, train_loader, val_loader, optimizer, device, lambda_dice = 1.0, lr = 1e-4, weight_decay = 1e-2, num_classes = 4):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -462,7 +477,7 @@ class SemanticSegTrainer:
 
     def fit(self, num_epochs):
         ckpt_path = "checkpoints/unet_stageA.pt"
-        best = 1e9
+        best = float("inf")
         for epoch in range(1, num_epochs + 1):
             avg_loss, avg_dice = self.train_one_epoch(epoch)
             avg_val_loss, avg_val_dice = self.validate_one_epoch(epoch)
@@ -475,13 +490,15 @@ class SemanticSegTrainer:
                 best = avg_loss
                 best_val_loss = avg_val_loss
                 
-                save_ckpt (ckpt_path, model = self.model, optimizer = self.optimizer, epoch = int(epoch), best_loss = float(avg_loss), best_val_dice = float(avg_val_dice), avg_val_loss = float(avg_val_loss))
+                save_ckpt_basic(ckpt_path, model = self.model, optimizer = self.optimizer, epoch = int(epoch), best_loss = float(avg_loss), best_val_dice = float(avg_val_dice), avg_val_loss = float(avg_val_loss))
                 print(type(epoch), type(avg_loss))
 
 class SemanticSegTriage:
-    def __init__(self, triage_model, train_loader, device, lr=1e-4, weight_decay=0.01, num_classes = 4):
+    ckpt_model_attr = "triage_model"
+    def __init__(self, triage_model, train_loader, val_loader, device, lr=1e-4, weight_decay=0.01, num_classes = 4):
         self.triage_model = triage_model.to(device)
         self.train_loader = train_loader
+        self.val_loader = val_loader
         self.device = device
         self.num_classes = num_classes
         self.triage_bce = nn.BCEWithLogitsLoss()
@@ -505,14 +522,26 @@ class SemanticSegTriage:
             , weight_decay=self.optimizer.param_groups[0].get("weight_decay", 0.01)
         )
 
+    def pick_voxels(self, y_true, y_score_np, max_voxels = 20000):
+        n = len(y_true)
+        if n <= max_voxels:
+            return y_true, y_score_np
+        idx = np.random.choice(n, size=max_voxels,replace=False)
+
+        return y_true[idx], y_score_np[idx]
 
     def triage_one_epoch(self, epoch):
 
         self._set_stage_b_mode()
 
         total_triage_loss = 0.0
+        val_auc = 0.0
 
-        pbar = tqdm(self.train_loader, desc=f"validator epoch {epoch}")
+        all_y_true = []
+        all_y_score = []
+        
+
+        pbar = tqdm(self.val_loader, desc=f"validator epoch {epoch}")
         print(f"triage-device:{self.device}")
 
         for batch in pbar:
@@ -521,37 +550,115 @@ class SemanticSegTriage:
 
             y = y[:, 0].long()
             y = torch.where(y == 4, torch.tensor(3, device=self.device), y)
+            """
+            replacement = torch.tensor(3, device=y.device, dtype=y.dtype)
+            y = torch.where(y == 4, replacement, y) || y.masked_fill_(y == 4, 3)
+            """
 
             y_case = (y > 0).flatten(1).any(dim=1).float().unsqueeze(1)
             print(f"expected y_case == [B, 1], {y_case}")
 
+            out = self.triage_model(x, run_seg=True, run_triage=True, detach_feat=True)
+            case_logit = out.case_logit
+            seg_logit = out.seg_logits
+
             self.optimizer.zero_grad(set_to_none=True)
 
-            out = self.triage_model(x, run_seg=False, run_triage=True, detach_feat=True)
-            case_logit = out.case_logit
-
+            # loss validation
             loss = self.triage_bce(case_logit, y_case)
             loss.backward()
             self.optimizer.step()
 
-            total_triage_loss += loss.item()
-            pbar.set_postfix(loss=f"{loss.item:.3f}", case_logit=f"{case_logit.squeeze().detach().cpu().numpy()}")
-        
-        avg_triage_loss = total_triage_loss / len(self.train_loader)
-        return avg_triage_loss
+            
 
-    def triage_fit(self, num_epochs, ckpt_path="checkpoints/triage_stageB.pt"):
-        best = 1e-9
+            with torch.no_grad():
+                # auc_validation
+                # TD-DO : replace softmax with another func
+                prob = torch.softmax(seg_logit, dim=1)
+                y_true = y.reshape(-1).detach().cpu().numpy()
+
+            
+                y_score_np = (prob.permute(0, 2, 3, 4, 1).reshape(-1, prob.shape[1]).detach().cpu().numpy())
+
+                y_true_epoch, y_score_epoch = self.pick_voxels(y_true, y_score_np)
+
+                all_y_true.append(y_true_epoch)
+                all_y_score.append(y_score_epoch)
+
+
+            pbar.set_postfix(loss=f"{loss.item():.3f}", case_logit=f"{case_logit.squeeze().detach().cpu().numpy()}")
+            
+            total_triage_loss += loss.item()
+
+        avg_triage_loss = total_triage_loss / len(self.val_loader)
+
+        y_true_total = np.concatenate(all_y_true)
+        y_score_total = np.concatenate(all_y_score)
+
+        val_auc = roc_auc_score(y_true_total, y_score_total, labels=[0, 1, 2, 3], multi_class="ovr", average="macro")
+
+
+        return avg_triage_loss, val_auc
+
+    def triage_fit(self, num_epochs, ckpt_path="checkpoints/triage_stageB.pt", trial: ViTTrialConfig | None = None):
+
+        best_auc = -float("inf")
+        best_loss = float("inf")
+
         for epoch in range(1, num_epochs + 1):
-            avg_triage_loss = self.triage_one_epoch(epoch)
-            print(f"[stageB] Epoch [{epoch} / {num_epochs}] | triage_loss : {avg_triage_loss}")
-            if avg_triage_loss < best:
-                best = avg_triage_loss
-                save_ckpt(ckpt_path, model=self.triage_model, optimizer=self.optimizer, epoch=int(epoch), best_loss=float(avg_triage_loss), best_val_dice = None, avg_val_loss = float(avg_triage_loss))
-                print(f"saved best triage model at epoch {epoch} with triage_loss {avg_triage_loss:.3f}")
+            avg_triage_loss, val_auc = self.triage_one_epoch(epoch)
+            print(f"[stageB] Epoch [{epoch} / {num_epochs}] | triage_loss : {avg_triage_loss} | validation_auc : {val_auc}")
+            
+            is_best = (
+                (val_auc > best_auc + 1e-12) or
+                (abs(val_auc - best_auc) <= 1e-12 and avg_triage_loss < best_loss - 1e-12)
+            )
+
+            if is_best:
+                best_auc = val_auc
+                best_loss = avg_triage_loss
+                if trial is not None:
+                    save_ckpt_keyed(
+                        ckpt_path,
+                        model=self.triage_model,
+                        optimizer=self.optimizer,
+                        scheduler=None,
+                        epoch=int(epoch),
+                        best_loss=float(avg_triage_loss),
+                        best_val_dice=None,
+                        avg_val_loss=float(avg_triage_loss),
+                        last_val_auc = float(val_auc),
+                        trial_config = asdict(trial)
+                    )
+                else:
+                    save_ckpt_keyed(
+                        ckpt_path,
+                        model=self.triage_model,
+                        optimizer=self.optimizer,
+                        scheduler=None,
+                        epoch=int(epoch),
+                        best_loss=float(avg_triage_loss),
+                        best_val_dice=None,
+                        avg_val_loss=float(avg_triagse_loss),
+                        last_val_auc = float(val_auc),
+                        trial_config = asdict(trial)
+                    )
+                
+
+                benchmark = {
+                    "best_loss": best_loss,
+                    "best_auc": best_auc,
+                    "epoch": epoch,
+                }
+
+                return benchmark
+
+            return benchmark
+
 
 class SemanticSegHybrid:
-    def __init__(self, hybrid_model, train_loader, val_loader, optimizer, device, lambda_cls=0.2, lambda_dice=1.0, lr_unet=1e-5, lr_vit=1e-4, weight_decay=0.01, num_classes=4):
+    ckpt_model_attr = "hybrid_model"
+    def __init__(self, hybrid_model, train_loader, val_loader, optimizer, device, lambda_cls=0.2, lambda_dice=1.0, lr_unet=1e-5, lr_vit=1e-4, weight_decay=0.01, num_classes=4, num_epochs:int = 1):
         self.hybrid_model = hybrid_model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -559,6 +666,7 @@ class SemanticSegHybrid:
         self.lambda_cls = lambda_cls
         self.lambda_dice = lambda_dice
         self.num_classes = num_classes
+        self.num_epochs = num_epochs
 
         self.seg_ce_loss = nn.CrossEntropyLoss()
         self.triage_bce_loss = nn.BCEWithLogitsLoss()
@@ -577,27 +685,49 @@ class SemanticSegHybrid:
     def _prep(self, batch):
         x = batch["image"].to(self.device)
         y = batch["label"].to(self.device)
+
+        y = y[:, 0].long()
         y = torch.where(y == 4, 3, y)
 
         y_case = (y > 0).flatten(1).any(dim=1).float().unsqueeze(1)
 
         return x, y, y_case
+
+    def set_scheduler(self):
+
+        steps = len(self.train_loader)
+        total_steps = self.num_epochs * steps
+        warmup_steps = min(1, total_steps - 1)
+
+        sc = make_warmup_cosine_scheduler(self.optimizer, warmup_steps=warmup_steps, total_steps=total_steps, min_lr_ratio=0.05)
+        
+        return sc
     
-    def train_one_epoch(self, epoch):
+    def train_one_epoch(self, epoch:int, scheduler=None):
         self.hybrid_model.train()
+
+        n_batches = 0
+
         total_loss = 0.0
         total_dice = 0.0
+        total_cls = 0.0
+
+        all_logits = []
+        all_targets = []
+        # all_dice = []
 
         scaler = GradScaler("cuda")
-        scheduler = make_warmup_cosine_scheduler(self.optimizer, warmup_steps=300, total_steps=3000, min_lr_ratio=0.05)
+        scheduler = self.set_scheduler()
+
         print(f"hybrid train scheduler:{scheduler}")
 
         pbar = tqdm(self.train_loader, desc=f"hybrid train epoch {epoch}")
         print(f"hybrid-train-device: {self.device}")
 
         for batch in pbar:
-            x, y, y_case = self.prep(batch)
+            x, y, y_case = self._prep(batch)
             print(f"x: {x.shape}, y: {y.shape}, y_case: {y_case.shape}")
+            target = y["anomaly"].to(self.device, non_blocking=True).float().view(-1)
 
             with autocast("cuda"):
                 self.optimizer.zero_grad(set_to_none=True)
@@ -621,23 +751,40 @@ class SemanticSegHybrid:
 
                 total_loss += loss.item()
                 total_cls += loss_cls.item()
+
+                n_batches += 1
+                
+                all_logits.append(case_logit.detach().cpu())
+                all_targets.append(target.detach().cpu())
+                # all_dice.append()
                 pbar.set_postfix(train_loss=f"{loss.item():.3f}", cls_loss=f"{loss_cls.item():.3f}")
         
-        avg_loss = total_loss / max(1, len(self.train_loader))
-        avg_cls = total_cls / max(1, len(self.train_loader))
-        return avg_loss, avg_cls
+        avg_loss = total_loss / max(1, len(n_batches))
+        avg_cls = total_cls / max(1, len(n_batches))
+
+        metrics = compute_epoch_binary_metrics
+        train_auroc = metrics["auroc"]
+        train_auprc = metrics["auprc"]
+
+        return{avg_loss, avg_cls, train_auroc, train_auprc}
 
     @torch.no_grad()
-    def validate_one_epoch(self, epoch):
+    def validate_one_epoch(self, epoch:int):
         self.hybrid_model.eval()
         total_loss = 0.0
-        total_dice = 0.0
+        total_cls = 0.0
 
+        all_logits = []
+        all_targets = []
+        all_cls = []
+        
         pbar = tqdm(self.val_loader, desc=f"hybrid val epoch {epoch}")
         print(f"hybrid-val-device: {self.device}")
 
         for batch in pbar:
-            x, y, y_case = self.prep(batch)
+            x, y, y_case = self._prep(batch)
+
+            target = y["anomaly"].to(self.device, non_blocking=True).float().view(-1)
 
             out = self.hybrid_model(x, run_seg=True, run_triage=True, detach_feat=True)
 
@@ -653,21 +800,79 @@ class SemanticSegHybrid:
 
                 total_loss += loss.item()
                 total_cls += loss_cls.item()
+
+
+
+                all_logits.append(case_logit.detach().cpu())
+                all_targets.append(target.detach().cpu())
+                all_cls.append(loss_cls,detach().cpu())
+                
                 pbar.set_postfix(val_loss=f"{loss.item():.3f}", cls_loss=f"{loss_cls.item():.3f}")
         
         avg_loss = total_loss / max(1, len(self.val_loader))
         avg_cls = total_cls / max(1, len(self.val_loader))
-        return avg_loss, avg_cls
+        
+        metrics = compute_epoch_binary_metrics
+        val_auroc = metrics["auroc"]
+        val_auprc = metrics["auprc"]
+
+        return {avg_loss, avg_cls, val_auroc, val_auprc}
     
     def fit(self, num_epochs, ckpt_path="checkpoints/hybrid_unet_vit.pt"):
-        best = 1e-9
+
+
+        # import scheduler
+        scheduler = self.set_scheduler()
+        print(f"scheduler: {scheduler}")
+
+        best_val_loss = float("inf")
+        best_train_loss = float("inf")
+        best_val_auroc = -1.0
+        best_val_auprc = -1.0
+        best_epoch = 0
+
         for epoch in range(1, num_epochs + 1):
-            avg_loss, avg_cls = self.train_one_epoch(epoch)
-            print(f"[hybrid] Epoch [{epoch} / {num_epochs}] | loss : {avg_loss:.3f} | cls_loss: {avg_cls:.3f}")
-            if avg_loss < best:
+            train_metrics = self.train_one_epoch(epoch, scheduler=scheduler)
+            val_metrics = self.validate_one_epoch(epoch)
+
+            current_auprc = val_metrics["val_auprc"]
+
+            if not math.isnan(current_auprc):
+                if current_auprc > best_val_auprc:
+                    best_val_auprc = float(current_auprc)
+                    best_val_auroc = float(val_metrics["val_auroc"])
+                    best_val_loss = float(val_metrics["avg_loss"])
+                    best_train_loss = float(train_metrics["avg_loss"])
+                    best_epoch = int(epoch)
+
+                    ckpt = {
+                        "model": self.model.state_dict(),
+                        "optimizer": self.optimizer.state_dict(),
+                        "epoch": int(epoch),
+                        "best_val_loss": float(best_val_loss),
+                        "best_val_auroc": float(best_val_auroc),
+                        "best_val_auprc": float(best_val_auprc),
+                        "best_train_loss": float(best_train_loss)
+                    }
+                    
+                    if trial is not None:
+                        ckpt["trial_config"] = asdict(trial)
+
+                    torch.save(ckpt, ckpt_path)
+                    print(f"ckpt saved: {ckpt_path}")
+            
+            return {
+                "epoch": best_epoch,
+                "best_val_loss": best_val_loss,
+                "best_val_auprc": best_val_auprc,
+                "best_val_auroc": best_val_auroc,
+                "best_train_loss": best_train_loss,
+            }
+                    
+            """if avg_loss < best:
                 best = avg_loss
-                save_ckpt(ckpt_path, model=self.hybrid_model, optimizer=self.optimizer, epoch=int(epoch), best_loss=float(avg_loss), best_val_dice = None, avg_val_loss = float(avg_cls))
-                print(f"saved best hybrid model at epoch {epoch} with loss {avg_loss:.3f} and cls_loss {avg_cls:.3f}")
+                save_ckpt_keyed(ckpt_path, model=self.hybrid_model, optimizer=self.optimizer, scheduler=scheduler, epoch=int(epoch), best_loss=float(avg_loss), best_val_dice = None, avg_val_loss = float(avg_cls), last_val_auc=None)
+                print(f"saved best hybrid model at epoch {epoch} with loss {avg_loss:.3f} and cls_loss {avg_cls:.3f}")"""
 
 if __name__ == "__main__":
 
@@ -703,8 +908,7 @@ if __name__ == "__main__":
 
     
     triage_model = build_default_hybrid(unet = unet_model, unet_feat_channels = 256)
-
-    num_epochs = 3
+    num_epochs = 10
 
     # Stage A - Unet training
     trainer = SemanticSegTrainer(
@@ -717,22 +921,60 @@ if __name__ == "__main__":
 
     trainer.fit(num_epochs = num_epochs)
     unet_pt = pt_loader("checkpoints/unet_stageA.pt")
+    unet_metadata = load_ckpt_basic(
+        "checkpoints/unet_stageA.pt",
+        model = unet_model,
+        device="cpu",
+        strict = False,
+        trainable_prefix = None,
+        lr = 1e-4,
+        weight_decay = 1e-5,
+        betas=(0.9, 0.999),
+        eps = 1e-9,
+        verbose = True,
+    )
 
-    print(f"Stage A done: {unet_pt.keys()}")
+    stage_a_avg_val_loss = unet_metadata["avg_val_loss"]
+    print(f"Stage A avg_val_loss : {stage_a_avg_val_loss}")
+
     print(f"Stage B start")
 
     # Stage B - triage training
     triage_trainer = SemanticSegTriage(
         triage_model = triage_model,
         train_loader = train_loader,
+        val_loader = val_loader,
         device = device,
     )
 
     triage_trainer.triage_fit(num_epochs = num_epochs)
-    vit_pt = pt_loader("checkpoint/vit_stageB.pt")
+    vit_pt_key = pt_loader("checkpoints/triage_stageB.pt")
+    vit_metadata = load_ckpt_keyed(
+        "checkpoints/triage_stageB.pt",
+        triage_model,
+        scheduler = None,
+        device="cpu",
+        )
+
+    stage_b_val_auc_m = vit_metadata["last_val_auc"]
+    print(f"last_val_auc {stage_b_val_auc_m}")
 
     # Stage C - hybrid training
-    hybrid_trainer = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device)
+    hybrid_model = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device, num_epochs = num_epochs)
 
-    hybrid_trainer.fit(num_epochs = num_epochs)
+    hybrid_model.fit(num_epochs = num_epochs)
+
+    # import scheduler
+    scheduler = hybrid_model.set_scheduler()
+
     hybrid_pt = pt_loader("checkpoints/hybrid_unet_vit.pt")
+    hybrid_metadata = load_ckpt_keyed(
+        "checkpoints/hybrid_unet_vit.pt",
+        triage_model,
+        scheduler,
+        device="cpu",
+    )
+    
+    stage_c_avg_val_loss = unet_metadata["avg_val_loss"]
+    print(f"Stage C avg_val_loss : {stage_c_avg_val_loss}")
+    

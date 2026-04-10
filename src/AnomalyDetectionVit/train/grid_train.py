@@ -12,9 +12,10 @@ import torch.nn as nn
 
 import torch.optim as optim
 import numpy as np
+import pandas as pd
 
 from torch.utils.data import DataLoader
-from dataclclasses import dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from typing import Any, Callable, Sequence
@@ -22,13 +23,15 @@ from typing import Any, Callable, Sequence
 
 from tqdm import tqdm
 
+
 from AnomalyDetectionVit.models.vit_3d import Light3DVit
+from AnomalyDetectionVit.utils.util  import sanitize_filename, create_ablation_dataframe
 
 # ----------------------------------
 # functions
 # ----------------------------------
 
-def build_vit_model(trial: ViTTrialConfig) -> nn.Module
+def build_vit_model(trial: ViTTrialConfig) -> nn.Module:
      
     vit = Light3DVit(
         in_channels = 4,
@@ -62,15 +65,15 @@ def build_seg_trainer(*, model: nn.Module, train_loader:DataLoader, val_loader:D
 # ----------------------------------
 @dataclass(frozen=True)
 class ViTGrid:
-    patch_sizes: Sequence[int] = (4, 8)
-    embed_dims: Sequence[int] = (64, 128)
-    depths: Sequence[int] = (2, 2)
+    patch_size: Sequence[int] = (4, 8)
+    embed_dim: Sequence[int] = (64, 128)
+    depth: Sequence[int] = (2, 4)
     num_heads: Sequence[int] = (4, 8)
-    dropouts: Sequence[float] = (0.0,)
+    dropout: Sequence[float] = (0.0, 0.01)
     mlp_ratio:Sequence[float] = (2.0, 4.0)
-    lrs : Sequence[float] = (1e-4, 3e-4)
-    weight_decays: Sequence[float] = (1e-2,)
-    lambda_dices: Sequence[float] = (1.0,)
+    lr : Sequence[float] = (1e-4, 3e-4)
+    weight_decay: Sequence[float] = (1e-2, 1e-5)
+    lambda_dice: Sequence[float] = (1.0,)
     use_amp: Sequence[bool] = (True,)
 
     def validate(self) -> None:
@@ -109,6 +112,50 @@ class ViTTrialConfig:
     lambda_dice: float
     use_amp: bool
 
+
+
+
+
+
+
+
+def get_vit_trials(mode:str = "ablation", seeds:Sequence[int] = (42, 43)) -> list[VitTrialConfig]:
+    base = VitTrialConfig()
+
+    if mode == "sanity":
+        return [replace(base, seed=a) for a in seeds]
+    if mode == "ablation":
+        trials: list[VitTrialConfig] = []
+
+        for a in seeds:
+            trials.append(replace(base, seed=a))
+
+        trials.extend([
+            replace(base, seed=42, patch_size=8),
+            replace(base, seed=42, embed_dim=128),
+            replace(base, seed=42, depth=4),
+            replace(base, seed=42, depth=4),
+            replace(base, seed=42, num_heads=8),
+            replace(base, seed=42, mlp_ratio=4.0),
+            replace(base, seed=42, lr=3e-4),
+        ])
+
+        return trials
+
+    raise ValueError(f"unknown mode: {mode}")
+
+def make_trial_name(trial: ViTTrialConfig) -> str:
+    return (
+        f"vit_ps{trial.patch_size}"
+        f"_dim{trial.embed_dim}"
+        f"_depth{trial.depth}"
+        f"_heads{trial.num_heads}"
+        f"_mlp{trial.mlp_ratio}"
+        f"_lr{trial.lr}"
+        f"_wd{trial.weight_decay}"
+        f"_seed{trial.seed}"
+    )
+
 # ----------------------------------
 #  Utilities
 # ----------------------------------
@@ -141,7 +188,7 @@ def iter_vit_trials(
             for embed_dim in grid.embed_dims:
                 for depth in grid.depths:
                     for num_heads in grid.num_heads:
-                        for mlp_ratio in grid.mlp_ratio:
+                        for mlp_ratio in grid.mlp_ratios:
                             for lr in grid.lrs:
                                 for weight_decay in grid.weight_decays:
                                     for lambda_dice in grid.lambda_dices:
@@ -168,20 +215,21 @@ def iter_vit_trials(
 # ----------------------------------
 # Grid Search
 # ----------------------------------
-def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | torch.device, train_loader: DataLoader, val_loader: DataLoader, model_factory: Callable[[ViTTrialConfig], nn.Module], trainer_factory: Callable[[nn.Module, DataLoader, DataLoader, torch.device], None], seeds: Sequence[int] = (42,), grid: ViTGrid | None = None, num_epochs: int = 30) -> list[dict[str, Any]]:
+def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | torch.device, train_loader: DataLoader, val_loader: DataLoader, model_factory: Callable[[ViTTrialConfig], nn.Module], trainer_factory: Callable[..., Any], seeds: Sequence[int] = (42,), grid: ViTGrid | None = None, num_epochs: int = 30) -> list[dict[str, Any]]:
     if grid is None:
         grid = ViTGrid()
     
     device = torch.device(device)
     out_csv = Path(out_csv)
-    out_csv.mkdir(parents=True, exist_ok=True)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
     ckpt_path = Path(ckpt_path)
     ckpt_path.mkdir(parents=True, exist_ok=True)
+    
 
-    trials = iter_vit_trials(seeds=seeds, grid=grid)
-
-    if not trials:
+    if len(trials) == 0:
         raise ValueError("No valid trials configs")
+    else:
+        trials = list(iter_vit_trials(seeds=seeds, grid=grid))
     
     results: list[dict[str, Any]] = []
 
@@ -193,20 +241,18 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
               f"depth={trial.depth}"
               f"num_heads={trial.num_heads}")
 
-        set_global_seed(trial.seed)
+        set_global_seed(trial.seeds)
 
-        trial_name = (
-            f"vit_patch_size: {trial.patch_size}"
-            f"dim:{trial.embed_dim}"
-            f"depth: {trial.depth}"
-            f"num_heads: {trial.num_heads}"
-            f"mlp_ratio:{trial.mlp_ratio}"
-        )
+        trial_name = make_trial_name(trial)
 
-        ckpt_path = ckpt_path / f"{trial_name}.pt"
+        trial_path = ckpt_path / f"{sanitize_filename(trial_name)}.pt"
 
         model = None
         trainer = None
+        optimizer = None
+        scheduler = None
+
+        fit: dict[str, Any] | None = None
 
         try:
             if device.type == "cuda":
@@ -232,7 +278,8 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
 
             fit = trainer.fit(
                 num_epochs=num_epochs,
-                ckpt_path=str(ckpt_path)
+                ckpt_path=str(trial_path),
+                trial=trial
             )
 
             row: dict[str, Any] = {
@@ -249,7 +296,7 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
                     torch.cuda.max_memory_allocated(device) / (1024**2), 2
                 )
             else:
-                row["ma_cuda_memory_mb"] = 0.0
+                row["max_cuda_memory_mb"] = 0.0
         
         except Exception as e:
             row = {
@@ -257,7 +304,7 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
                 "trial_name": trial_name,
                 "best_val_loss":math.nan,
                 "best_val_dice":math.nan,
-                "epoch":int(fit["epoch"]),
+                "epoch":int(fit.get("epoch", -1)) if fit is None else -1,
                 "max_cuda_memory_mb":math.nan,
                 "status": f"error: {repr(e)}",
             }
@@ -274,6 +321,61 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
     
     return results
 
+
+def execution_ablation_pt():
+    print("torch:", torch.__version__)
+    print("GPU:", torch.cuda.is_available())
+
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    CSV_ROOT = Path("..") / "results" / "ablation" / "vit_ablation.csv"
+    CKPT_ROOT = Path("..") / "results" / "ablation" / "vit_ablation"
+
+    try:
+        results = run_vit_trials(
+            out_csv = CSV_ROOT,
+            ckpt_root = CKPT_ROOT,
+            device = device,
+            train_loader = train_loader,
+            val_loader = val_loader,
+            model_factory = build_vit_model,
+            trainer_factory = build_seg_trainer,
+            trials = trials,
+            num_epochs = 30,
+        )
+        
+        
+        if ckpt_root is not None:
+            CKPT_ROOT = ckpt_root
+        else:
+            raise ValueError(f"ckpt_root must be provided")
+
+        out_csv = Path("..") / "results" / "ablation" / "filename.csv"
+
+
+        if out_csv.exists():
+            print(f"successfully saved: {out_csv}")
+
+            df = create_ablation_dataframe(
+                ckpt_dir = CKPT_ROOT,
+                out_csv = out_csv,
+                device="cpu"
+            )
+        
+        else:
+            raise FileNotFoundError(f"dataframe file does not exist")
+
+        return df
+
+    except ValueError as ve:
+        print(f"[ERROR] Invalid argument: {ve}")
+    except FileNotFoundError as fnf:
+        print(f"[ERROR] Missing file: {fnf}")
+    except Exception as e:
+        print(f"[ERROR] Unexpected issue: {e}")  
+        
+
 if __name__ == "__main__":
 
     print("torch:", torch.__version__)
@@ -288,29 +390,56 @@ if __name__ == "__main__":
     ckpt_dir = Path("../results/checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    CSV_ROOT = "../results/ablation/vit_grid_search.csv"
-    CKPT_ROOT = "../results/checkpoints/vit_grid_search"
+    CSV_ROOT = Path("..") / "results" / "ablation" / "vit_grid_search.csv"
+    CKPT_ROOT = Path("..") / "results" / "checkpoints" / "vit_grid_search"
 
-    results = grid_search_vit(
-        out_csv = CSV_ROOT,
-        ckpt_path = CKPT_ROOT,
-        device = device,
-        train_loader = train_loader,
-        val_loader = val_loader,
-        model_factory = build_vit_model,
-        trainer_factory = build_seg_trainer,
-        seed = (42, 43),
-        grid = ViTGrid(
-            patch_sizes = (4, 8),
-            embed_dims = (64, 128),
-            depths = (2, 2),
-            num_head = (4, 8),
-            dropouts = (0.0,),
-            mlp_ratio = (2.0, 4.0),
-            lrs = (1e-4, 3e-4),
-            weight_decays = (1e-2,),
-            lambda_dices = (1.0,),
-            use_amp = (True,)
-        ),
-        num_epochs = 30,
-    )
+    try:
+        results = grid_search_vit(
+            out_csv = CSV_ROOT,
+            ckpt_path = CKPT_ROOT,
+            device = device,
+            train_loader = train_loader,
+            val_loader = val_loader,
+            model_factory = build_vit_model,
+            trainer_factory = build_seg_trainer,
+            seed = (42, 43),
+            grid = ViTGrid(
+                patch_size = (4,), # (4, 8)
+                embed_dim = (64, 128),
+                depth = (2, 4), # (2, 4)
+                num_heads = (4, 8),
+                dropout = (0.0, 0.01),
+                mlp_ratio = (2.0, 4.0),
+                lr = (1e-4, 3e-4),
+                weight_decay = (1e-2,), # (1e-2, 1e-5)
+                lambda_dice = (1.0,),
+                use_amp = (True,)
+            ),
+            num_epochs = 30,
+        )
+        
+        if ckpt_root is not None:
+            CKPT_ROOT = ckpt_root
+        else:
+            raise ValueError(f"ckpt_root must be provided")
+
+        out_csv = Path("..") / "results" / "ablation" / "filename.csv"
+
+        if out_csv.exists():
+            print(f"successfully saved: {out_csv}")
+            
+            df = create_ablation_dataframe(
+                ckpt_dir = CKPT_ROOT,
+                out_csv = out_csv,
+                device="cpu"
+            )
+        
+        else:
+            raise FileNotFoundError(f"dataframe file does not exist")
+
+    except ValueError as ve:
+        print(f"[ERROR] Invalid argument: {ve}")
+    except FileNotFoundError as fnf:
+        print(f"[ERROR] Missing file: {fnf}")
+    except Exception as e:
+        print(f"[ERROR] Unexpected issue: {e}")

@@ -107,23 +107,11 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Prepare data
-    val_dataset = BraTSPatchDataset(
-        root_dir = DATA_ROOT,
-        patch = (96, 96, 96),
-        tumor_positive_prob = 0.5,
-        anomaly_def='any_tumor'
-    )
-
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=(device.type == "cuda"), drop_last=False)
-
-    unet3d = UNet3D(in_channels=4,
-                   base_channels=32,
-                   num_levels=4,
-                   dropout=0.0,
-                   groups=8,
-                   out_channels=1).to(device)
+    unet3d = UNet3D(in_channels=4, out_channels=4, base_channels = 32).to(device)
     
     model = build_default_hybrid(unet = unet3d, unet_feat_channels = 256)
+
+    optimizer = torch.optim.AdamW(unet_model.parameters(), lr=1e-4, weight_decay=0.01)
 
     metrics = eval_hybrid(
         model = model, 

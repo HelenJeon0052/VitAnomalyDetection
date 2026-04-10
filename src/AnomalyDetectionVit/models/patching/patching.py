@@ -18,14 +18,14 @@ class ViT3DPatchEmbed(nn.Module):
 
     def forward(self, x):
         # [B, dim, Dd, Ll, Ww]
-        print("input.shape:", x.shape)
+        """print("input.shape:", x.shape)
         print("input.dtype:", x.dtype)
-        print("patch_size _ forward:", self.patch_size)
+        print("patch_size _ forward:", self.patch_size)"""
         x = self.proj(x)
-        print("input.dtype:", x.shape)
+        # print("input.dtype:", x.shape)
         B, C, Dd, Ll, Ww = x.shape
         x = x.flatten(2).transpose(1, 2) # [B, T, C]
-        print("input.dtype:", x.shape)
+        # print("input.dtype:", x.shape)
 
         return x, (Dd, Ll, Ww)
 
