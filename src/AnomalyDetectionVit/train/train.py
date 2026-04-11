@@ -3,7 +3,7 @@ from __future__ import annotations
 
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Dict, Optional, Tuple
 
 import os, glob, random
@@ -20,7 +20,7 @@ from torch.amp import autocast, GradScaler
 
 from tqdm import tqdm
 from pathlib import Path
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, average_precision_score
 
 import pandas as pd
 import nibabel as nib
@@ -596,62 +596,63 @@ class SemanticSegTriage:
         y_score_total = np.concatenate(all_y_score)
 
         val_auc = roc_auc_score(y_true_total, y_score_total, labels=[0, 1, 2, 3], multi_class="ovr", average="macro")
+        val_auprc = average_precision_score(y_true_total, y_score_total)
 
-
-        return avg_triage_loss, val_auc
+        return avg_triage_loss, val_auc, val_auprc
 
     def triage_fit(self, num_epochs, ckpt_path="checkpoints/triage_stageB.pt", trial: ViTTrialConfig | None = None):
 
         best_auc = -float("inf")
+        best_auprc = -float("inf")
         best_loss = float("inf")
 
         for epoch in range(1, num_epochs + 1):
-            avg_triage_loss, val_auc = self.triage_one_epoch(epoch)
+            avg_triage_loss, val_auc, val_auprc = self.triage_one_epoch(epoch)
             print(f"[stageB] Epoch [{epoch} / {num_epochs}] | triage_loss : {avg_triage_loss} | validation_auc : {val_auc}")
             
             is_best = (
-                (val_auc > best_auc + 1e-12) or
-                (abs(val_auc - best_auc) <= 1e-12 and avg_triage_loss < best_loss - 1e-12)
+                (val_auprc > best_auprc + 1e-12) or
+                (abs(val_auprc - best_auprc) <= 1e-12 and avg_triage_loss < best_loss - 1e-12)
+            )
+            
+            trial_config = (
+                asdict(trial)
+                if trial is not None
+                else {
+                    "stage": "B",
+                    "run_type": "manual",
+                    "lr": float(self.optimizer.param_groups[0]["lr"]),
+                    "weight_decay": float(self.optimizer.param_groups[0].get("weight_decay", 0.0)),
+                    "lambda_cls": float(getattr(self, "lambda_cls", 1.0)),
+                    "use_amp": bool(getattr(self, "use_amp", False)),
+                }
             )
 
             if is_best:
                 best_auc = val_auc
+                best_auprc = val_auprc
                 best_loss = avg_triage_loss
-                if trial is not None:
-                    save_ckpt_keyed(
-                        ckpt_path,
-                        model=self.triage_model,
-                        optimizer=self.optimizer,
-                        scheduler=None,
-                        epoch=int(epoch),
-                        best_loss=float(avg_triage_loss),
-                        best_val_dice=None,
-                        avg_val_loss=float(avg_triage_loss),
-                        last_val_auc = float(val_auc),
-                        trial_config = asdict(trial)
-                    )
-                else:
-                    save_ckpt_keyed(
-                        ckpt_path,
-                        model=self.triage_model,
-                        optimizer=self.optimizer,
-                        scheduler=None,
-                        epoch=int(epoch),
-                        best_loss=float(avg_triage_loss),
-                        best_val_dice=None,
-                        avg_val_loss=float(avg_triage_loss),
-                        last_val_auc = float(val_auc),
-                        trial_config = asdict(trial)
+                save_ckpt_keyed(
+                    ckpt_path,
+                    model=self.triage_model,
+                    optimizer=self.optimizer,
+                    scheduler=None,
+                    epoch=int(epoch),
+                    best_loss=float(avg_triage_loss),
+                    best_val_dice=None,
+                    avg_val_loss=float(avg_triage_loss),
+                    last_val_auc = float(val_auc),
+                    last_val_auprc = float(val_auprc),
+                    trial_config = trial_config
                     )
                 
 
                 benchmark = {
                     "best_loss": best_loss,
                     "best_auc": best_auc,
+                    "best_auprc": best_auprc,
                     "epoch": epoch,
                 }
-
-                return benchmark
 
             return benchmark
 
@@ -882,6 +883,8 @@ class SemanticSegHybrid:
                 "best_train_loss": best_train_loss,
         }
 
+if __name__ = "__main__":
+
     print("torch:", torch.__version__)
     print("torch cuda:", torch.version.cuda)
     print("available:", torch.cuda.is_available())
@@ -914,7 +917,7 @@ class SemanticSegHybrid:
 
     
     triage_model = build_default_hybrid(unet = unet_model, unet_feat_channels = 256)
-    num_epochs = 10
+    num_epochs = 3
 
     # Stage A - Unet training
     trainer = SemanticSegTrainer(
@@ -965,11 +968,14 @@ class SemanticSegHybrid:
     stage_b_val_auc_m = vit_metadata["last_val_auc"]
     print(f"last_val_auc {stage_b_val_auc_m}")
 
-     # import scheduler
-    scheduler = hybrid_model.set_scheduler()
+    
 
     # Stage C - hybrid training
-    hybri_trainer = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device, num_epochs = num_epochs)
+    hybrid_trainer = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device, num_epochs = num_epochs)
+    
+    
+    # import scheduler
+    scheduler = hybrid_trainer.set_scheduler()
     hybrid_trainer.fit(num_epochs = num_epochs)
    
 

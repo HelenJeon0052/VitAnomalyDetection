@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from torch.utils.data import DataLoader
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from typing import Any, Callable, Sequence

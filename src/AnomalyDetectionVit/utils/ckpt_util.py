@@ -163,7 +163,7 @@ def load_ckpt_basic(
 # identical structure of model | names of params | trainable subset | optimizer | training strategy | saved ckpt has name-keyed
 
 
-def save_ckpt_keyed(path: str, model, optimizer, scheduler, epoch, best_loss, best_val_dice, avg_val_loss, last_val_auc, trainable_prefix: str | None = "vit."):
+def save_ckpt_keyed(path: str, model, optimizer, scheduler, epoch, best_loss, best_val_dice, avg_val_loss, last_val_auc, last_val_auprc, trial_config, trainable_prefix: str | None = "vit."):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     id_to_name = {id(param): name for name, param in model.named_parameters()}
 
@@ -194,6 +194,8 @@ def save_ckpt_keyed(path: str, model, optimizer, scheduler, epoch, best_loss, be
         "best_val_dice": to_float_none(best_val_dice),
         "avg_val_loss": to_float_none(avg_val_loss),
         "last_val_auc": to_float_none(last_val_auc),
+        "last_val_auprc": to_float_none(last_val_auprc),
+        "trial_config": trial_config,
         "opt_state_by_name": opt_state_by_name,
         "opt_group_meta": opt_group_meta,
         "trainale_param_names": trainable_param_names,
