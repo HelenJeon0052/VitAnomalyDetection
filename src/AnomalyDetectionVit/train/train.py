@@ -880,14 +880,7 @@ class SemanticSegHybrid:
                 "best_val_auprc": best_val_auprc,
                 "best_val_auroc": best_val_auroc,
                 "best_train_loss": best_train_loss,
-        }    
-                    
-            """if avg_loss < best:
-                best = avg_loss
-                save_ckpt_keyed(ckpt_path, model=self.hybrid_model, optimizer=self.optimizer, scheduler=scheduler, epoch=int(epoch), best_loss=float(avg_loss), best_val_dice = None, avg_val_loss = float(avg_cls), last_val_auc=None)
-                print(f"saved best hybrid model at epoch {epoch} with loss {avg_loss:.3f} and cls_loss {avg_cls:.3f}")"""
-
-if __name__ == "__main__":
+        }
 
     print("torch:", torch.__version__)
     print("torch cuda:", torch.version.cuda)
