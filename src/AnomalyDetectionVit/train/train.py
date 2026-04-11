@@ -639,7 +639,7 @@ class SemanticSegTriage:
                         epoch=int(epoch),
                         best_loss=float(avg_triage_loss),
                         best_val_dice=None,
-                        avg_val_loss=float(avg_triagse_loss),
+                        avg_val_loss=float(avg_triage_loss),
                         last_val_auc = float(val_auc),
                         trial_config = asdict(trial)
                     )
@@ -674,13 +674,15 @@ class SemanticSegHybrid:
         self.hybrid_model.unfreeze_unet()
         self.hybrid_model.unfreeze_vit()
 
-        self.optimizer = torch.optim.AdamW(
+        """self.optimizer = torch.optim.AdamW(
             [
                 {"params": [p for p in self.hybrid_model.unet.parameters() if p.requires_grad], "lr": lr_unet},
                 {"params": [p for p in self.hybrid_model.vit.parameters() if p.requires_grad], "lr": lr_vit},
             ],
             weight_decay=weight_decay
-        )
+        )"""
+        self.optimizer = optimizer
+        self.scaler = GradScaler(device="cuda", enabled=(self.use_amp and torch.cuda.is_available()))
 
     def _prep(self, batch):
         x = batch["image"].to(self.device)
@@ -716,9 +718,6 @@ class SemanticSegHybrid:
         all_targets = []
         # all_dice = []
 
-        scaler = GradScaler("cuda")
-        scheduler = self.set_scheduler()
-
         print(f"hybrid train scheduler:{scheduler}")
 
         pbar = tqdm(self.train_loader, desc=f"hybrid train epoch {epoch}")
@@ -727,11 +726,13 @@ class SemanticSegHybrid:
         for batch in pbar:
             x, y, y_case = self._prep(batch)
             print(f"x: {x.shape}, y: {y.shape}, y_case: {y_case.shape}")
-            target = y["anomaly"].to(self.device, non_blocking=True).float().view(-1)
+            # target = y["anomaly"].to(self.device, non_blocking=True).float().view(-1)
+            target = y_case.to(self.device, non_blocking=True).float().view(-1)
 
-            with autocast("cuda"):
-                self.optimizer.zero_grad(set_to_none=True)
+            self.optimizer.zero_grad(set_to_none=True)
 
+            with autocast("cuda", enabled=(self,use_amp and self.device.type == "cuda")):
+                
                 out = self.hybrid_model(x, run_seg=True, run_triage=True, detach_feat=True)
 
                 seg_logits = out.seg_logits
@@ -743,11 +744,13 @@ class SemanticSegHybrid:
                 loss_cls = self.triage_bce_loss(case_logit, y_case)
                 loss = loss_seg + self.lambda_cls * loss_cls
 
-                scaler.scale(loss).backward()
-                scaler.step(self.optimizer)
-                scheduler.step()
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                
+                if scheduler is not None:
+                    scheduler.step()
 
-                scaler.update()
+                self.scaler.update()
 
                 total_loss += loss.item()
                 total_cls += loss_cls.item()
@@ -759,14 +762,19 @@ class SemanticSegHybrid:
                 # all_dice.append()
                 pbar.set_postfix(train_loss=f"{loss.item():.3f}", cls_loss=f"{loss_cls.item():.3f}")
         
-        avg_loss = total_loss / max(1, len(n_batches))
-        avg_cls = total_cls / max(1, len(n_batches))
+        avg_loss = total_loss / max(1, n_batches)
+        avg_cls = total_cls / max(1, n_batches)
 
-        metrics = compute_epoch_binary_metrics
+        metrics = compute_epoch_binary_metrics(all_logits, all_targets)
         train_auroc = metrics["auroc"]
         train_auprc = metrics["auprc"]
 
-        return{avg_loss, avg_cls, train_auroc, train_auprc}
+        return {
+            "avg_train_loss":avg_loss,
+            "avg_train_cls": avg_cls,
+            "train_auroc":train_auroc,
+            "train_auprc":train_auprc
+        }
 
     @torch.no_grad()
     def validate_one_epoch(self, epoch:int):
@@ -784,12 +792,12 @@ class SemanticSegHybrid:
         for batch in pbar:
             x, y, y_case = self._prep(batch)
 
-            target = y["anomaly"].to(self.device, non_blocking=True).float().view(-1)
-
-            out = self.hybrid_model(x, run_seg=True, run_triage=True, detach_feat=True)
+            target = y_case.to(self.device, non_blocking=True).float().view(-1)
+            # target = y["anomaly"].to(self.device, non_blocking=True).float().view(-1)
 
             with autocast("cuda"):
-                self.optimizer.zero_grad()
+
+                out = self.hybrid_model(x, run_seg=True, run_triage=True, detach_feat=True)
 
                 seg_logits = out.seg_logits
                 loss_seg = self.seg_ce_loss(seg_logits, y) + self.lambda_dice * soft_dice_loss(seg_logits, y, n_dim=2, num_classes=self.num_classes)
@@ -805,20 +813,25 @@ class SemanticSegHybrid:
 
                 all_logits.append(case_logit.detach().cpu())
                 all_targets.append(target.detach().cpu())
-                all_cls.append(loss_cls,detach().cpu())
+                all_cls.append(loss_cls.detach().cpu())
                 
                 pbar.set_postfix(val_loss=f"{loss.item():.3f}", cls_loss=f"{loss_cls.item():.3f}")
         
-        avg_loss = total_loss / max(1, len(self.val_loader))
-        avg_cls = total_cls / max(1, len(self.val_loader))
+        avg_loss = total_loss / max(1, n_batches)
+        avg_cls = total_cls / max(1, n_batches)
         
-        metrics = compute_epoch_binary_metrics
+        metrics = compute_epoch_binary_metrics(all_logits, all_targets)
         val_auroc = metrics["auroc"]
         val_auprc = metrics["auprc"]
 
-        return {avg_loss, avg_cls, val_auroc, val_auprc}
+        return {
+            "avg_val_loss":avg_loss
+            "avg_val_cls": avg_cls,
+            "val_auroc": val_auroc,
+            "val_auprc": val_auprc
+        }
     
-    def fit(self, num_epochs, ckpt_path="checkpoints/hybrid_unet_vit.pt"):
+    def fit(self, num_epochs, ckpt_path="checkpoints/hybrid_unet_vit.pt", trial=True):
 
 
         # import scheduler
@@ -841,8 +854,8 @@ class SemanticSegHybrid:
                 if current_auprc > best_val_auprc:
                     best_val_auprc = float(current_auprc)
                     best_val_auroc = float(val_metrics["val_auroc"])
-                    best_val_loss = float(val_metrics["avg_loss"])
-                    best_train_loss = float(train_metrics["avg_loss"])
+                    best_val_loss = float(val_metrics["avg_val_loss"])
+                    best_train_loss = float(train_metrics["avg_train_loss"])
                     best_epoch = int(epoch)
 
                     ckpt = {
@@ -861,13 +874,13 @@ class SemanticSegHybrid:
                     torch.save(ckpt, ckpt_path)
                     print(f"ckpt saved: {ckpt_path}")
             
-            return {
+        return {
                 "epoch": best_epoch,
                 "best_val_loss": best_val_loss,
                 "best_val_auprc": best_val_auprc,
                 "best_val_auroc": best_val_auroc,
                 "best_train_loss": best_train_loss,
-            }
+        }    
                     
             """if avg_loss < best:
                 best = avg_loss
@@ -959,14 +972,15 @@ if __name__ == "__main__":
     stage_b_val_auc_m = vit_metadata["last_val_auc"]
     print(f"last_val_auc {stage_b_val_auc_m}")
 
-    # Stage C - hybrid training
-    hybrid_model = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device, num_epochs = num_epochs)
-
-    hybrid_model.fit(num_epochs = num_epochs)
-
-    # import scheduler
+     # import scheduler
     scheduler = hybrid_model.set_scheduler()
 
+    # Stage C - hybrid training
+    hybri_trainer = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device, num_epochs = num_epochs)
+    hybrid_trainer.fit(num_epochs = num_epochs)
+   
+
+    
     hybrid_pt = pt_loader("checkpoints/hybrid_unet_vit.pt")
     hybrid_metadata = load_ckpt_keyed(
         "checkpoints/hybrid_unet_vit.pt",

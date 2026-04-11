@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 from AnomalyDetectionVit.models.vit_3d import Light3DVit
 from AnomalyDetectionVit.utils.util  import sanitize_filename, create_ablation_dataframe
+from train  import msd_datasets_and_loaders
 
 # ----------------------------------
 # functions
@@ -226,10 +227,12 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
     ckpt_path.mkdir(parents=True, exist_ok=True)
     
 
-    if len(trials) == 0:
-        raise ValueError("No valid trials configs")
-    else:
+    trials: list[ViTTrialConfig] = []
+
+    try:
         trials = list(iter_vit_trials(seeds=seeds, grid=grid))
+    except Exception as e:
+        print(f"trials setting check required")
     
     results: list[dict[str, Any]] = []
 
@@ -286,7 +289,9 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
                 **asdict(trial),
                 "trial_name": trial_name,
                 "best_val_loss":float(fit["best_val_loss"]),
-                "best_val_dice":float(fit["best_val_dice"]),
+                "best_val_auroc":float(fit["best_val_auroc"]),
+                "best_val_auprc":float(fit["best_val_auprc"]),
+                "best_train_loss":float(fit["best_train_loss"]),
                 "epoch":int(fit["epoch"]),
                 "status": "success",
             }
@@ -303,7 +308,10 @@ def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | 
                 **asdict(trial),
                 "trial_name": trial_name,
                 "best_val_loss":math.nan,
-                "best_val_dice":math.nan,
+                "best_val_loss":math.nan,
+                "best_val_auroc":math.nan,
+                "best_val_auprc":math.nan,
+                "best_train_loss":math.nan,
                 "epoch":int(fit.get("epoch", -1)) if fit is None else -1,
                 "max_cuda_memory_mb":math.nan,
                 "status": f"error: {repr(e)}",
@@ -390,8 +398,26 @@ if __name__ == "__main__":
     ckpt_dir = Path("../results/checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    data_dir = "../dataset/msd/Task01_BrainTumour"
+    json_path = os.path.join(data_dir, "dataset.json")
+
+    cache_dir = os.path.join(data_dir, "persistent_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    cache_dir = Path(cache_dir)
+
     CSV_ROOT = Path("..") / "results" / "ablation" / "vit_grid_search.csv"
     CKPT_ROOT = Path("..") / "results" / "checkpoints" / "vit_grid_search"
+
+
+    train_loader, val_loader, test_data_list = msd_datasets_and_loaders(
+        json_path=json_path,
+        cache_dir=cache_dir,
+        batch_size=1,
+        num_workers=2,
+        train_ratio=0.8,
+        seed=42,
+    )
 
     try:
         results = grid_search_vit(
@@ -402,7 +428,7 @@ if __name__ == "__main__":
             val_loader = val_loader,
             model_factory = build_vit_model,
             trainer_factory = build_seg_trainer,
-            seed = (42, 43),
+            seeds = (42, 43),
             grid = ViTGrid(
                 patch_size = (4,), # (4, 8)
                 embed_dim = (64, 128),
@@ -415,13 +441,9 @@ if __name__ == "__main__":
                 lambda_dice = (1.0,),
                 use_amp = (True,)
             ),
-            num_epochs = 30,
+            num_epochs = 3,
         )
         
-        if ckpt_root is not None:
-            CKPT_ROOT = ckpt_root
-        else:
-            raise ValueError(f"ckpt_root must be provided")
 
         out_csv = Path("..") / "results" / "ablation" / "filename.csv"
 

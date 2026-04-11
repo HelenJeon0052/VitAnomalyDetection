@@ -69,9 +69,10 @@ def create_ablation_dataframe(ckpt_dir:str | Path, out_csv: str | Path | None = 
         "lambda_dice",
         "use_amp",
         "epoch",
-        "best_loss",
-        "best_val_dice",
-        "best_auc",
+        "best_val_loss",
+        "best_val_auroc",
+        "best_val_auprc",
+        "best_train_loss"
         "ckpt_path",
         "status"
     ]
