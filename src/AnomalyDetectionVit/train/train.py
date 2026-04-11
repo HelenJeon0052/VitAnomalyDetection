@@ -825,13 +825,13 @@ class SemanticSegHybrid:
         val_auprc = metrics["auprc"]
 
         return {
-            "avg_val_loss":avg_loss
+            "avg_val_loss":avg_loss,
             "avg_val_cls": avg_cls,
             "val_auroc": val_auroc,
             "val_auprc": val_auprc
         }
     
-    def fit(self, num_epochs, ckpt_path="checkpoints/hybrid_unet_vit.pt", trial=True):
+    def fit(self, num_epochs, ckpt_path="checkpoints/hybrid_unet_vit.pt", trial=False):
 
 
         # import scheduler
