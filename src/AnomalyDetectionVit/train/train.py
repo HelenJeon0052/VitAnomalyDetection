@@ -883,7 +883,7 @@ class SemanticSegHybrid:
                 "best_train_loss": best_train_loss,
         }
 
-if __name__ = "__main__":
+if __name__ == "__main__":
 
     print("torch:", torch.__version__)
     print("torch cuda:", torch.version.cuda)
