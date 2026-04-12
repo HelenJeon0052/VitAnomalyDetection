@@ -5,7 +5,26 @@ import torch
 
 from torch._subclasses.fake_tensor import FakeTensorMode
 
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from dataclasses import dataclass
+
 from AnomalyDetectionVit.scheduler.lr import make_warmup_cosine_scheduler
+
+@dataclass
+class LoadMetricConfig:
+    model: torch.nn.Module
+    optimizer: Optional[torch.optim.Optimizer]
+    scheduler: Optional[Any]
+    epoch: int
+    start_epoch: int
+    metrics: Dict[str, Any]
+    config: Dict[str, Any]
+    extra: Dict[str, Any]
+    optimizer_restored: bool
+    scheduler_restored: bool
+    ckpt_path: Path
 
 def to_float_none(x):
     if x is None:
@@ -86,6 +105,9 @@ def load_ckpt_basic(
         eps:float = 1e-9,
         verbose:bool = True,
     ):
+
+    path = Path(path)
+    
     # fresh optimizer setting
     ckpt = torch.load(path, map_location=device)
 
@@ -108,16 +130,27 @@ def load_ckpt_basic(
         eps=eps,
     )
 
+
+    
+    optimizer_restored = False
+
     # only debug
-    if opt is not None and "optimizer" in ckpt:
-        print("Current optimizer param groups lengths:")
-        for i, g in enumerate(opt.param_groups):
-            print(f"  Group {i}: {len(g['params'])} parameters")
-        
-        saved_opt = ckpt["optimizer"]
-        print("Saved optimizer param groups lengths:")
-        for i, g in enumerate(saved_opt["param_groups"]):
-            print(f"  Group {i}: {len(g['params'])} parameters (saved)")
+    if opt is not None and ckpt.get("optimizer") is not None:
+
+        try:
+            opt.load_state_dict(ckpt["optimizer"])
+            optimizer_restored = True
+            print("Current optimizer param groups lengths:")
+            for i, g in enumerate(opt.param_groups):
+                print(f"  Group {i}: {len(g['params'])} parameters")
+            
+            saved_opt = ckpt["optimizer"]
+            print("Saved optimizer param groups lengths:")
+            for i, g in enumerate(saved_opt["param_groups"]):
+                print(f"  Group {i}: {len(g['params'])} parameters (saved)")
+
+        except (ValueError, KeyError) as e:
+            print(f"[warning] optimizer state mismatch: {e}")
 
     # for consistency, build fresh scheduler
     scheduler = make_warmup_cosine_scheduler(
@@ -127,23 +160,56 @@ def load_ckpt_basic(
         min_lr_ratio=0.05,
     )
 
+    scheduler_restored = False
+
+    # only debug
+    if scheduler is not None and ckpt.get("scheduler") is not None:
+
+        try:
+            scheduler.load_state_dict(ckpt["scheduler"])
+            scheduler_restored = True
+            print("Current scheduler param groups lengths:")
+            for i, g in enumerate(opt.param_groups):
+                print(f"  Group {i}: {len(g['params'])} parameters")
+            
+            saved_sc = ckpt["scheduler"]
+            print("Saved scheduler param groups lengths:")
+            for i, g in enumerate(saved_sc["param_groups"]):
+                print(f"  Group {i}: {len(g['params'])} parameters (saved)")
+
+        except (ValueError, KeyError) as e:
+            print(f"[warning] scheduler state mismatch: {e}")
+
     epoch = int(ckpt["epoch"])
-    best_loss = to_float_none(ckpt.get("best_loss"))
-    best_val_dice = to_float_none(ckpt.get("best_val_dice"))
-    avg_val_loss = to_float_none(ckpt.get("avg_val_loss"))
+    start_epoch = epoch + 1
 
-    meta = {
-        "model": model,
-        "optimizer": opt,
-        "scheduler": scheduler,
-        "epoch": epoch,
-        "best_loss": best_loss,
-        "best_val_dice": best_val_dice,
-        "avg_val_loss": avg_val_loss,
-        "ckpt": ckpt
-    }
+    metrics = ckpt.get("metrics", {})
+    config = ckpt.get("config", {})
+    extra = ckpt.get("extra", {})
 
-    print(f"Metadata loaded successfully")
+    if not isinstance(metrics, dict):
+        metrics={}
+    if not isinstance(config, dict):
+        config={}
+    if not isinstance(extra, dict):
+        extra={}
+        
+    loaded_results = LoadMetricConfig(
+        model = model,
+        optimizer = opt,
+        scheduler = scheduler,
+        epoch = epoch,
+        start_epoch = start_epoch,
+        metrics = metrics,
+        config = config,
+        extra = extra,
+        optimizer_restored = optimizer_restored,
+        scheduler_restored = scheduler_restored,
+        ckpt_path = path,
+    )
+    
+
+    print(f"results loaded successfully")
 
     
     if verbose:
@@ -153,7 +219,7 @@ def load_ckpt_basic(
             print(f"missing keys = {incompatible.missing_keys}")
             print(f"unexpected_keys = {incompatible.unexpected_keys}")
 
-    return meta
+    return loaded_results
 
 
 

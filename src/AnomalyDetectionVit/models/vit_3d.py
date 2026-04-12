@@ -31,6 +31,7 @@ class NeuralODEBlock(nn.Module):
         # x(t+1) = x(t) + \int f(x(t)) dt
         return self.lin(torch.relu(x))
 
+
 class Light3DVit(nn.Module):
     def __init__(self,
                  in_channels=4,
@@ -47,7 +48,7 @@ class Light3DVit(nn.Module):
                  friction_position='mid',
                  patch_size=4,
                  triage_pool='cls',
-                 triage_num=256):
+                 triage_num=32):
         super().__init__()
 
         self.encoder = HierarchicalEncoder3D(

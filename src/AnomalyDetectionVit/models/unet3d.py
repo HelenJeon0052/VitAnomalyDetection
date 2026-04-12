@@ -258,25 +258,77 @@ class UNet3D(nn.Module):
         feat = self.bottleneck(l)
         return feat, skips
 
+    def forward_encoder(self, x: torch.Tensor):
+        feat, skips = self.encode(x)
+
+        return feat, list(skips)
+    
+    def decode_from_encoder(self, feat: torch.Tensor, skips):
+        skips = list(skips)
+        skips.pop()
+
+        l = feat
+        
+        for up, dec in zip(self.ups, self.decs):
+            skip = skips.pop()
+            l = up(l, size=skip.shape[-3:])
+            l = torch.cat([l, skip], dim=1)
+            l = dec(l)
+
+        return l
+
+    def forward_full(self, x: torch.Tensor):
+        feat, skips = self.forward_encoder(x)
+        dec_feat = self.decode_from_encoder(feat, skips)
+        seg_logits = self.out(dec_feat)
+
+        return seg_logits, feat, dec_feat
+
+    def forward_features(self, x: torch.Tensor):
+        feat, _ = self.forward_encoder(x)
+
+        return feat
+
+    def forward(self, x: torch.Tensor):
+        seg_logits, _, _ = self.forward_full(x)
+
+        return seg_logits
+    
+    """def forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
+        feat, skips = self.encode(x)
+
+        return feat, list(skips)
+    
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         feat, _ = self.encode(x)
         print(f"forward features output shape: {feat.shape}")
 
         return feat
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        l, skips = self.encode(x)
+    def forward_full(self, x: torch.Tensor) -> torch.Tensor:
+        feat, skips = self.encode(x)
+
+        l = feat
+
         skips = list(skips)
 
-        # decode : pop skips from end (the last = the deepest skip)
         skips.pop()
+
         for up, dec in zip(self.ups, self.decs):
             skip = skips.pop()
             l = up(l, size=skip.shape[-3:])
-            l = torch.cat([l, skip], dim=1)
+            l = torch.cat([l, skip], dim = 1)
             l = dec(l)
+
+        seg_logits = self.out(l)
+        print("l:", l.shape)
+
+        return seg_logits, l
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seg_logits, _ = self.forward_full(x)
             
-        return self.out(l)
+        return seg_logits"""
 
     
 # ---------------------------------------
