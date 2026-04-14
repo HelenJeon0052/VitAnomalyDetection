@@ -13,18 +13,6 @@ from typing import Optional
 
 
 
-def to_scalar(x) -> float:
-    if x in None:
-        print(f"x is not provided, convert to nan")
-        return math.nan
-    
-    if torch.is_tensor(x):
-        return float(x.detach().item())
-    
-    return float(x)
-
-
-
 
 def binary_classification_logits(logits: torch.Tensor, targets: torch.Tensor):
     logits = logits.detach().float().view(-1).cpu()

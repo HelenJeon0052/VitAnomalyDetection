@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Dict, Optional, Tuple
 
-import os, glob, random
+import os, glob, random, math
 from time import time
 
 import torch
@@ -304,13 +304,14 @@ class UNetFeatures(nn.Module):
 
     def forward_encoder(self, x:torch.Tensor):
         print(f"forward encoder = {hasattr(self.unet, 'forward_encoder')}")
-        if hasattr(self.unet, 'forward_features'):
+        if hasattr(self.unet, 'forward_encoder'):
             return self.unet.forward_encoder(x)
 
+        
         out = self.unet(x)
         
         if isinstance(out, (tuple, list)) and len(out) == 2:
-            seg_logits, feat = out
+            feat, _skips = out
             return feat
 
         raise AttributeError("Unet must implement forward_features(x)")
@@ -323,7 +324,7 @@ class UNetFeatures(nn.Module):
         out = self.unet(x)
         
         if isinstance(out, (tuple, list)) and len(out) == 2:
-            _seg_logits, feat = out
+            feat, _seg_logits = out
             return feat
 
         raise AttributeError("Unet must implement forward_features(x)")
@@ -336,8 +337,8 @@ class UNetFeatures(nn.Module):
 
         out = self.unet(x)
         
-        if isinstance(out, (tuple, list)) and len(out) == 2:
-            seg_logits, feat = out
+        if isinstance(out, (tuple, list)) and len(out) == 3:
+            seg_logits, feat, _ = out
             return seg_logits, feat
 
         raise AttributeError("Unet must implement forward_full(x)")
@@ -405,7 +406,7 @@ class HybridUnetVit3D(nn.Module):
             feat = feat if self.return_feat else None
         )
 
-def build_default_hybrid(unet:nn.Module, unet_feat_channels: int, triage_embed_dim: Tuple(int, int, int) = (48, 96, 192), triage_depth: Tuple(int, int, int) = (2, 2, 2), patch_size: int = 4, triage_num : int = 256) -> HybridUnetVit3D:
+def build_default_hybrid(unet:nn.Module, unet_feat_channels: int, triage_embed_dim: Tuple[int, int, int] = (48, 96, 192), triage_depth: Tuple[int, int, int] = (2, 2, 2), patch_size: int = 4, triage_num : int = 256) -> HybridUnetVit3D:
     print(f"unet_feat_channels {unet_feat_channels}")
     vit = Light3DVit(
         in_channels = unet_feat_channels,
@@ -422,7 +423,7 @@ def build_default_hybrid(unet:nn.Module, unet_feat_channels: int, triage_embed_d
 
 class SemanticSegTrainer:
     ckpt_model_attr = "train_model"
-    def __init__(self, model, train_loader, val_loader, optimizer, device, lambda_dice = 1.0, lr = 1e-4, weight_decay = 1e-2, num_classes = 4):
+    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, device, lambda_dice = 1.0, lr = 1e-4, weight_decay = 1e-2, num_classes = 4):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -431,6 +432,10 @@ class SemanticSegTrainer:
         self.num_classes = num_classes
         self.ce_loss = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = lr, weight_decay = weight_decay)
+        self.scheduler = scheduler
+
+        if self.scheduler is None:
+            raise ValueError(f"scheduler setting must be explicit")
     
     def train_one_epoch(self, epoch):
         self.model.train()
@@ -441,8 +446,9 @@ class SemanticSegTrainer:
         pbar = tqdm(self.train_loader, desc = f'[seg train mode] Epoch {epoch}')
 
         scaler = GradScaler("cuda")
-        scheduler = make_warmup_cosine_scheduler(self.optimizer, warmup_steps=100, total_steps=1000, min_lr_ratio=0.05)
-        print(f"train scheduler: {scheduler}")
+
+        # scheduler = make_warmup_cosine_scheduler(self.optimizer, warmup_steps=100, total_steps=1000, min_lr_ratio=0.05)
+        # print(f"train scheduler: {scheduler}")
 
         print(f"train-device: {self.device}")
 
@@ -465,16 +471,27 @@ class SemanticSegTrainer:
                     logits.detach(), y, self.num_classes
                 )
 
-                scaler.scale(loss).backward()
-                scaler.step(self.optimizer)
+                print("torch.is_grad_enabled():", torch.is_grad_enabled())
+                print("model class:", self.model.__class__.__name__)
+                print("model.training:", self.model.training)
 
-                scheduler.step()
+                first_param = next(self.model.parameters())
+                print("first_param.requires_grad:", first_param.requires_grad)
+                print("first_param.grad is None:", first_param.grad is None)
+                print("loss.requires_grad:", loss.requires_grad)
+                print("loss.grad_fn:", loss.grad_fn)
 
-                scaler.update()
+                loss.backward()
+                    
+                #scaler.scale(loss).backward()
+                #scaler.step(self.optimizer)
+
+                self.scheduler.step()
+
+                #scaler.update()
 
                 total_loss += loss.item()
                 total_loss_dice += loss_dice.item()
-                total_dice += dice
 
                 pbar.set_postfix(train_loss=f"{loss.item():.3f}", dice_loss=f"{loss_dice.item():.3f}")
         
@@ -512,14 +529,14 @@ class SemanticSegTrainer:
                 total_loss_dice += loss_dice.item()
                 pbar.set_postfix(val_loss=f"{loss.item():.3f}", dice_loss=f"{loss_dice.item():.3f}")
         
-        avg_loss = total_loss / max(1, len(self.val_loader))
-        avg_dice = total_loss_dice / max(1, len(self.val_loader))
-        return avg_loss, avg_dice
+        avg_val_loss = total_loss / max(1, len(self.val_loader))
+        avg_val_dice = total_loss_dice / max(1, len(self.val_loader))
+        return avg_val_loss, avg_val_dice
         
 
     def fit(self, num_epochs):
         ckpt_path = "checkpoints/unet_stageA.pt"
-        best = float("inf")
+        best_loss = float("inf")
         for epoch in range(1, num_epochs + 1):
             avg_loss, avg_dice = self.train_one_epoch(epoch)
             avg_val_loss, avg_val_dice = self.validate_one_epoch(epoch)
@@ -528,18 +545,18 @@ class SemanticSegTrainer:
             print(f"Epoch [{epoch} / {num_epochs}] | Avg_loss : {avg_loss:.3f} | Avg_val_loss: {avg_val_loss:.3f}")
             print(f"avg_train_dice: {avg_dice:.3f} | avg_val_dice: {avg_val_dice:.3f}")
 
-            if avg_loss < best:
-                best = avg_loss
+            if avg_loss < best_loss:
+                best_loss = avg_loss
                 best_val_loss = avg_val_loss
-                best_loss_dice = avg_val_dice
+                best_val_dice = avg_val_dice
 
                 metrics = {
-                    "best_train_loss": best,
+                    "best_train_loss": best_loss,
                     "best_val_loss": best_val_loss,
-                    "best_loss_dice": best_loss_dice,
+                    "best_val_dice": best_val_dice,
                 }
                 
-                save_ckpt_basic(ckpt_path, model = self.model, optimizer = self.optimizer, epoch = int(epoch), best_loss = float(avg_loss), best_val_dice = float(avg_val_dice), avg_val_loss = float(avg_val_loss))
+                save_ckpt_basic(ckpt_path, model = self.model, optimizer = self.optimizer, epoch = int(epoch), best_loss = float(avg_loss), best_val_loss = float(best_val_loss), best_val_dice = float(best_val_dice))
                 print(type(epoch), type(avg_loss))
 
 class SemanticSegTriage:
@@ -620,6 +637,13 @@ class SemanticSegTriage:
 
             
 
+            
+            print("loss.requires_grad:", loss.requires_grad)
+            print("loss.grad_fn:", loss.grad_fn)
+
+            print("case_logit.requires_grad:", case_logit.requires_grad if case_logit is not None else None)
+            print("seg_logits.requires_grad:", seg_logit.requires_grad if seg_logit is not None else None)
+
             with torch.no_grad():
                 # auc_validation
                 # TD-DO : replace softmax with another func
@@ -644,24 +668,24 @@ class SemanticSegTriage:
         y_true_total = np.concatenate(all_y_true)
         y_score_total = np.concatenate(all_y_score)
 
-        val_auc = roc_auc_score(y_true_total, y_score_total, labels=[0, 1, 2, 3], multi_class="ovr", average="macro")
+        val_auroc = roc_auc_score(y_true_total, y_score_total, labels=[0, 1, 2, 3], multi_class="ovr", average="macro")
         val_auprc = average_precision_score(y_true_total, y_score_total)
 
-        return avg_triage_loss, val_auc, val_auprc
+        return avg_triage_loss, val_auroc, val_auprc
 
     def triage_fit(self, num_epochs, ckpt_path="checkpoints/triage_stageB.pt", trial: ViTTrialConfig | None = None):
 
-        best_auc = -float("inf")
-        best_auprc = -float("inf")
-        best_loss = float("inf")
+        best_val_auroc = -float("inf")
+        best_val_auprc = -float("inf")
+        best_val_loss = float("inf")
 
         for epoch in range(1, num_epochs + 1):
-            avg_triage_loss, val_auc, val_auprc = self.triage_one_epoch(epoch)
-            print(f"[stageB] Epoch [{epoch} / {num_epochs}] | triage_loss : {avg_triage_loss} | validation_auc : {val_auc}")
+            avg_triage_loss, val_auroc, val_auprc = self.triage_one_epoch(epoch)
+            print(f"[stageB] Epoch [{epoch} / {num_epochs}] | triage_loss : {avg_triage_loss} | validation_auc : {val_auroc}")
             
             is_best = (
-                (val_auprc > best_auprc + 1e-12) or
-                (abs(val_auprc - best_auprc) <= 1e-12 and avg_triage_loss < best_loss - 1e-12)
+                (val_auprc > best_val_auprc + 1e-12) or
+                (abs(val_auprc - best_val_auprc) <= 1e-12 and avg_triage_loss < best_val_loss - 1e-12)
             )
             
             trial_config = (
@@ -678,28 +702,28 @@ class SemanticSegTriage:
             )
 
             if is_best:
-                best_auc = val_auc
-                best_auprc = val_auprc
-                best_loss = avg_triage_loss
+                best_val_auroc = val_auroc
+                best_val_auprc = val_auprc
+                best_val_loss = avg_triage_loss
                 save_ckpt_keyed(
                     ckpt_path,
                     model=self.triage_model,
                     optimizer=self.optimizer,
                     scheduler=None,
                     epoch=int(epoch),
-                    best_loss=float(avg_triage_loss),
+                    best_loss=float(best_val_loss),
                     best_val_dice=None,
-                    avg_val_loss=float(avg_triage_loss),
-                    last_val_auc = float(val_auc),
-                    last_val_auprc = float(val_auprc),
-                    trial_config = trial_config
+                    best_val_loss=float(avg_triage_loss),
+                    last_val_auroc = float(best_val_auroc),
+                    last_val_auprc = float(best_val_auprc),
+                    config = trial_config
                     )
                 
 
                 benchmark = {
-                    "best_loss": best_loss,
-                    "best_auc": best_auc,
-                    "best_auprc": best_auprc,
+                    "best_val_loss": best_val_loss,
+                    "best_val_auroc": best_val_auroc,
+                    "best_val_auprc": best_val_auprc,
                     "epoch": epoch,
                 }
 
@@ -735,6 +759,11 @@ class SemanticSegHybrid:
         self.optimizer = optimizer
         self.scaler = GradScaler(device="cuda", enabled=(self.use_amp and torch.cuda.is_available()))
 
+        self.scheduler = scheduler
+
+        if self.scheduler is None:
+            raise ValueError(f"scheduler setting must be explict")
+
     def _prep(self, batch):
         x = batch["image"].to(self.device)
         y = batch["label"].to(self.device)
@@ -757,7 +786,7 @@ class SemanticSegHybrid:
         return sc
 
     def compute_seg_loss(self, seg_logits: torch.Tensor, y_seg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        loss_ce = self.seg_ce_loss(seg_logits, y)
+        loss_ce = self.seg_ce_loss(seg_logits, y_seg)
         loss_dice = soft_dice_loss(seg_logits, y_seg, n_dim=2, num_classes=self.num_classes)
         loss = loss_ce + (self.lambda_dice * loss_dice)
 
@@ -769,7 +798,7 @@ class SemanticSegHybrid:
 
         return self.triage_bce_loss(case_logit, y_case)
     
-    def train_one_epoch(self, epoch:int, scheduler=None):
+    def train_one_epoch(self, epoch:int):
         self.hybrid_model.train()
 
         n_batches = 0
@@ -781,8 +810,6 @@ class SemanticSegHybrid:
         all_logits = []
         all_targets = []
         # all_dice = []
-
-        print(f"hybrid train scheduler:{scheduler}")
 
         pbar = tqdm(self.train_loader, desc=f"hybrid train epoch {epoch}")
         print(f"hybrid-train-device: {self.device}")
@@ -810,11 +837,16 @@ class SemanticSegHybrid:
 
                 loss = loss_seg + self.lambda_cls * loss_cls
 
+                print("loss.requires_grad:", loss.requires_grad)
+                print("loss.grad_fn:", loss.grad_fn)
+
+                print("case_logit.requires_grad:", case_logit.requires_grad if case_logit is not None else None)
+                print("seg_logits.requires_grad:", seg_logits.requires_grad if seg_logits is not None else None)
+
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 
-                if scheduler is not None:
-                    scheduler.step()
+                self.scheduler.step()
 
                 self.scaler.update()
 
@@ -912,8 +944,8 @@ class SemanticSegHybrid:
         adaptive_lambda: bool = False"""
         
         # import scheduler
-        scheduler = self.set_scheduler()
-        print(f"scheduler: {scheduler}")
+        # scheduler = self.set_scheduler()
+        #  print(f"scheduler: {scheduler}")
 
         """constraints = HybridConstraint(
             best_val_dice = best_val_dice,
@@ -927,7 +959,7 @@ class SemanticSegHybrid:
         best_epoch = 0
 
         for epoch in range(1, num_epochs + 1):
-            train_metrics = self.train_one_epoch(epoch, scheduler=scheduler)
+            train_metrics = self.train_one_epoch(epoch)
             val_metrics = self.validate_one_epoch(epoch)
             
 
@@ -942,7 +974,7 @@ class SemanticSegHybrid:
                     best_epoch = int(epoch)
 
                     ckpt = {
-                        "model": self.model.state_dict(),
+                        "model": self.hybrid_model.state_dict(),
                         "optimizer": self.optimizer.state_dict(),
                         "epoch": int(epoch),
                         "best_val_loss": float(best_val_loss),
@@ -1043,12 +1075,7 @@ if __name__ == "__main__":
         scheduler = None,
         device="cpu",
         )
-
-    stage_b_val_auc_m = vit_metadata["last_val_auc"]
-    print(f"last_val_auc {stage_b_val_auc_m}")
-
     
-
     # Stage C - hybrid training
     hybrid_trainer = SemanticSegHybrid(hybrid_model = triage_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, device = device, num_epochs = num_epochs)
     
@@ -1063,9 +1090,5 @@ if __name__ == "__main__":
     hybrid_metadata = load_ckpt_keyed(
         "checkpoints/hybrid_unet_vit.pt",
         triage_model,
-        scheduler,
         device="cpu",
     )
-    
-    stage_c_avg_val_loss = unet_metadata["avg_val_loss"]
-    print(f"Stage C avg_val_loss : {stage_c_avg_val_loss}")

@@ -1,402 +1,680 @@
 from __future__ import annotations
-import os, glob, random
-from time import time
+import os, copy, math
 
 
-import csv
-import gc
-import math, random
 
+import itertools
 import torch
 import torch.nn as nn
 
-import torch.optim as optim
-import numpy as np
-import pandas as pd
+import json
+import shutil
 
-from torch.utils.data import DataLoader
-from dataclasses import dataclass, asdict
+from datetime import datetime
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from typing import Any, Callable, Sequence
-
-
-from tqdm import tqdm
+from AnomalyDetectionVit.utils.train_config import base_cfg
 
 
-from AnomalyDetectionVit.models.vit_3d import Light3DVit
-from AnomalyDetectionVit.utils.util  import sanitize_filename, create_ablation_dataframe
-from train  import msd_datasets_and_loaders
-
-# ----------------------------------
-# functions
-# ----------------------------------
-
-def build_vit_model(trial: ViTTrialConfig) -> nn.Module:
-     
-    vit = Light3DVit(
-        in_channels = 4,
-        num_classses = 4,
-        embed_dim = trial.embed_dim,
-        depths = trial.depth,
-        triage_num = trial.num_heads,
-        sr_ratios = (2, 1, 1),
-        block_type="sr",
-        triage_pool = "gap",
-        patch_size = trial.patch_size,
-    )
-    
-    return vit
-
-def build_seg_trainer(*, model: nn.Module, train_loader:DataLoader, val_loader:DataLoader, optimizer:optim.Optimizer, device:torch.device, lambda_dice:float, use_amp:bool):
-    return SematicSegTrainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        optimizer=optimizer,
-        device=device,
-        lambda_dice=lambda_dice,
-        num_classes=4,
-        use_amp=use_amp
-    )
+from AnomalyDetectionVit.utils.ckpt_util import save_ckpt_metric
+# from grid_train_csv import ViTTrialConfig
 
 
-# ----------------------------------
-# Configurations
-# ----------------------------------
-@dataclass(frozen=True)
-class ViTGrid:
-    patch_size: Sequence[int] = (4, 8)
-    embed_dim: Sequence[int] = (64, 128)
-    depth: Sequence[int] = (2, 4)
-    num_heads: Sequence[int] = (4, 8)
-    dropout: Sequence[float] = (0.0, 0.01)
-    mlp_ratio:Sequence[float] = (2.0, 4.0)
-    lr : Sequence[float] = (1e-4, 3e-4)
-    weight_decay: Sequence[float] = (1e-2, 1e-5)
-    lambda_dice: Sequence[float] = (1.0,)
-    use_amp: Sequence[bool] = (True,)
+from AnomalyDetectionVit.models.unet3d import UNet3D
+from train import SemanticSegHybrid, SemanticSegTrainer, SemanticSegTriage, msd_datasets_and_loaders, build_default_hybrid
 
-    def validate(self) -> None:
-        if not self.patch_sizes:
-            raise ValueError("Patch sizes cannot be empty")
-        if not self.embed_dims:
-            raise ValueError("Embed_dim cannot be empty")
-        if not self.depths:
-            raise ValueError("Depths cannot be empty")
-        if not self.num_heads:
-            raise ValueError("Num heads cannot be empty")
-        if not self.dropouts:
-            raise ValueError("Dropouts cannot be empty")
-        if not self.mlp_ratio:
-            raise ValueError("MLP ratio cannot be empty")
-        if not self.lrs:
-            raise ValueError("Learning ratess cannot be empty")
-        if not self.weight_decays:
-            raise ValueError("Weight decays cannot be empty")
-        if not self.lambda_dices:
-            raise ValueError("Lambda dices cannot be empty")
-        if not self.use_amp:
-            raise ValueError("Use amp cannot be empty")
+@dataclass
+class BestTracker:
+    mode: str
+    value: Optional[float] = None
 
-@dataclass(frozen=True)
-class ViTTrialConfig:
-    seed: int
-    patch_size: int
-    embed_dim: int
-    depth: int
-    num_heads: int
-    mlp_ratio: float
-    dropout: float
-    lr: float
-    weight_decay: float
-    lambda_dice: float
-    use_amp: bool
-
-
-
-
-
-
-
-
-def get_vit_trials(mode:str = "ablation", seeds:Sequence[int] = (42, 43)) -> list[VitTrialConfig]:
-    base = VitTrialConfig()
-
-    if mode == "sanity":
-        return [replace(base, seed=a) for a in seeds]
-    if mode == "ablation":
-        trials: list[VitTrialConfig] = []
-
-        for a in seeds:
-            trials.append(replace(base, seed=a))
-
-        trials.extend([
-            replace(base, seed=42, patch_size=8),
-            replace(base, seed=42, embed_dim=128),
-            replace(base, seed=42, depth=4),
-            replace(base, seed=42, depth=4),
-            replace(base, seed=42, num_heads=8),
-            replace(base, seed=42, mlp_ratio=4.0),
-            replace(base, seed=42, lr=3e-4),
-        ])
-
-        return trials
-
-    raise ValueError(f"unknown mode: {mode}")
-
-def make_trial_name(trial: ViTTrialConfig) -> str:
-    return (
-        f"vit_ps{trial.patch_size}"
-        f"_dim{trial.embed_dim}"
-        f"_depth{trial.depth}"
-        f"_heads{trial.num_heads}"
-        f"_mlp{trial.mlp_ratio}"
-        f"_lr{trial.lr}"
-        f"_wd{trial.weight_decay}"
-        f"_seed{trial.seed}"
-    )
-
-# ----------------------------------
-#  Utilities
-# ----------------------------------
-def set_global_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-def append_csv_row(path: str | Path, row: dict[str, Any]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    file_exists = path.exists()
-    with path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DicWriter(f, fieldnames=list(row.keys()))
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-def iter_vit_trials(
-    *, seeds: Sequence[int], grid: ViTGrid,
-) -> list[ViTTrialConfig]:
-    grid.validate()
-
-    trials: list[ViTTrialConfig] = []
-
-    for seed in seeds:
-        for patch_size in grid.patch_sizes:
-            for embed_dim in grid.embed_dims:
-                for depth in grid.depths:
-                    for num_heads in grid.num_heads:
-                        for mlp_ratio in grid.mlp_ratios:
-                            for lr in grid.lrs:
-                                for weight_decay in grid.weight_decays:
-                                    for lambda_dice in grid.lambda_dices:
-                                        for use_amp in grid.use_amp:
-                                            if embed_dim % num_heads != 0:
-                                                continue
-                                            trials.append(
-                                                ViTTrialConfig(
-                                                    seed=int(seed),
-                                                    patch_size=int(patch_size),
-                                                    embed_dim=int(embed_dim),
-                                                    depth=int(depth),
-                                                    num_heads=int(num_heads),
-                                                    mlp_ratio=float(mlp_ratio),
-                                                    dropout=float(dropout),
-                                                    lr=float(lr),
-                                                    weight_decay=float(weight_decay),
-                                                    lambda_dice=float(lambda_dice),
-                                                    use_amp=bool(use_amp)
-                                                )
-                                            )
-    return trials
-
-# ----------------------------------
-# Grid Search
-# ----------------------------------
-def grid_search_vit(*, out_csv: str | Path, ckpt_path:str | Path, device: str | torch.device, train_loader: DataLoader, val_loader: DataLoader, model_factory: Callable[[ViTTrialConfig], nn.Module], trainer_factory: Callable[..., Any], seeds: Sequence[int] = (42,), grid: ViTGrid | None = None, num_epochs: int = 30) -> list[dict[str, Any]]:
-    if grid is None:
-        grid = ViTGrid()
-    
-    device = torch.device(device)
-    out_csv = Path(out_csv)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    ckpt_path = Path(ckpt_path)
-    ckpt_path.mkdir(parents=True, exist_ok=True)
-    
-
-    trials: list[ViTTrialConfig] = []
-
-    try:
-        trials = list(iter_vit_trials(seeds=seeds, grid=grid))
-    except Exception as e:
-        print(f"trials setting check required")
-    
-    results: list[dict[str, Any]] = []
-
-    for idx, trial in enumerate(trials, start=1):
-        print(f"[{idx}/{len(trials)}]"
-              f"seed={trial.seed}"
-              f"patch_size={trial.patch_size}"
-              f"embed_dim={trial.embed_dim}"
-              f"depth={trial.depth}"
-              f"num_heads={trial.num_heads}")
-
-        set_global_seed(trial.seeds)
-
-        trial_name = make_trial_name(trial)
-
-        trial_path = ckpt_path / f"{sanitize_filename(trial_name)}.pt"
-
-        model = None
-        trainer = None
-        optimizer = None
-        scheduler = None
-
-        fit: dict[str, Any] | None = None
-
-        try:
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-                torch.cuda.reset_peak_memory_stats(device)
-            model = model_factory(trial).to(device)
-
-            optimizer = optim.AdamW(
-                model.parameters(),
-                lr=trial.lr,
-                weight_decay=trial.weight_decay
-            )
-
-            trainer = trainer_factory(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                optimizer=optimizer,
-                device=device,
-                lambda_dice=trial.lambda_dice,
-                use_amp=trial.use_amp
-            )
-
-            fit = trainer.fit(
-                num_epochs=num_epochs,
-                ckpt_path=str(trial_path),
-                trial=trial
-            )
-
-            row: dict[str, Any] = {
-                **asdict(trial),
-                "trial_name": trial_name,
-                "best_val_loss":float(fit["best_val_loss"]),
-                "best_val_auroc":float(fit["best_val_auroc"]),
-                "best_val_auprc":float(fit["best_val_auprc"]),
-                "best_train_loss":float(fit["best_train_loss"]),
-                "epoch":int(fit["epoch"]),
-                "status": "success",
-            }
-
-            if device.type == "cuda":
-                row["max_cuda_memory_mb"] = round(
-                    torch.cuda.max_memory_allocated(device) / (1024**2), 2
-                )
-            else:
-                row["max_cuda_memory_mb"] = 0.0
+    def check_value(self, new_value:float) -> bool:
+        if self.value is None:
+            return True
         
-        except Exception as e:
-            row = {
-                **asdict(trial),
-                "trial_name": trial_name,
-                "best_val_loss":math.nan,
-                "best_val_loss":math.nan,
-                "best_val_auroc":math.nan,
-                "best_val_auprc":math.nan,
-                "best_train_loss":math.nan,
-                "epoch":int(fit.get("epoch", -1)) if fit is None else -1,
-                "max_cuda_memory_mb":math.nan,
-                "status": f"error: {repr(e)}",
-            }
-
-        append_csv_row(out_csv, row)
-        results.append(row)
-
-        del trainer
-        del model
-        gc.collect()
-
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        if self.mode == "min":
+            return new_value < self.value
+        elif self.mode == "max":
+            return new_value > self.value
+        else:
+            raise ValueError(f"Unsupport mode: {mode}")
+        
+    def update(self, new_value: float) -> None:
+        self.value = new_value
     
-    return results
 
-
-def execution_ablation_pt():
-    print("torch:", torch.__version__)
-    print("GPU:", torch.cuda.is_available())
-
+@dataclass
+class ExperimentLogger:
+    root_dir: str | Path
+    exp_name: str
+    config: Dict[str, Any]
+    resume: bool = False
+    run_dir: Path = field(init=False)
+    ckpt_dir: Path = field(init=False)
+    metrics_path: Path = field(init=False)
+    config_path: Path = field(init=False)
+    best_trackers:Dict[str, BestTracker] = field(default_factory=dict)
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __post_init__(self) -> None:
+        self.root_dir = Path(self.root_dir)
+        self.run_dir = self._make_run_dir()
+        self.ckpt_dir = self.run_dir / "ckpts"
+        self.metrics_path = self.run_dir / "metrics.jsonl"
+        self.config_path = self.run_dir / "config.json"
+        
+        self.ckpt_dir.mkdir(parents = True, exist_ok = True)
+        self._save_json(self.config_path, self.config)
 
-    CSV_ROOT = Path("..") / "results" / "ablation" / "vit_ablation.csv"
-    CKPT_ROOT = Path("..") / "results" / "ablation" / "vit_ablation"
+    def _make_run_dir(self) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = self.root_dir / f"{timestamp}_{self.exp_name}"
+        run_dir.mkdir(parents = True, exist_ok = True)
 
-    try:
-        results = run_vit_trials(
-            out_csv = CSV_ROOT,
-            ckpt_root = CKPT_ROOT,
-            device = device,
+        return run_dir
+
+    @staticmethod
+    def _save_json(path: Path, obj:Dict[str, Any]) -> None:
+        with path.open("w", encoding = "utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+
+    def append_metrics(self, row:Dict[str, Any]) -> None:
+        with self.metrics_path.oepn("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    
+    def register_best_metric(self, metric_name:str, mode:str) -> None:
+        self.best_trackers[metric_name] = BestTracker(mode=mode)
+
+    def save_ckpt(self, filename:str, model: torch.nn.Module, optimizer: Optional[torch.optim.Optimizer], scheduler: Optional[Any], epoch: int, metrics: Dict[str, Any], config: Optional[dict[str, Any]]= None, trainable_prefix: str | None = "vit.", extra: Optional[dict[str, Any]] = None):
+        # import save_ckpt logic
+        path = self.ckpt_dir / filename
+        ckpt_path = path
+        ckpt = save_ckpt_metric(
+            ckpt_path=ckpt_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=ccheduler,
+            epoch=int(epoch),
+            metrics=metrics,
+        )
+
+        return path
+    
+    def save_last(self, filename:str, model: torch.nn.Module, epoch: int, metrics: Dict[str, Any], optimizer: Optional[torch.optim.Optimizer], scheduler: Optional[Any]):
+        return self.save_ckpt(
+            filename=filename,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=int(epoch),
+            metrics=metrics,
+            config = {},
+        )
+
+
+    def save_best(self, model: torch.nn.Module, epoch: int, metrics: Dict[str, Any], optimizer:Optional[torch.optim.Optimizer], scheduler:Optional[Any]):
+        saved = {}
+
+        for metric_name, tracker in self.best_tracker.items():
+            value = metrics.get(metric_name)
+            if not isinstance(value, (int, float)):
+                continue
+            value = float(value)
+        
+
+            if tracker.check_value(value):
+                tracker.update(value)
+                saved[metric_name] = self.save_ckpt(
+                    filename=f"best_{metric_name}.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    epoch=int(epoch),
+                    metrics=metrics,
+                    config = {},
+                    extra={"best_metric": metric_name, "best_value": value},
+                )
+        
+        return saved 
+
+def to_scalar(x: Any, name: str = "value") ->  Optional[float]:
+    if x in None:
+        return None
+    
+    if isinstance(x, torch.Tensor):
+        if x.numel() != 1:
+            raise ValueError(f"{name} must ne scalar tensor, got {tuple(x.shape)}")
+        x = x.detach().cpu().item()
+        
+    if isinstance(x, (int, float)):
+        x = float(x)
+        if math.isnan(x) or math.isinf(x):
+            raise ValueError(f"{name} is not finite {x}")
+        return x
+        
+    raise TypeError(f"{name} must be int | float | scalar, got = {type(x)}")
+
+
+
+def deep_update(base:Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = to_scalar(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+def set_nested_in_stage(stage_cfg: Dict[str, Any], path: str, value: Any) -> None:
+    keys = path.split(".")
+    cur = stage_cfg
+    for key in keys[:-1]:
+        if key not in cur or not isinstance(cur[key], dict):
+            cur[key] = {}
+        cur = cur[key]
+    cur[keys[-1]] = value
+
+def make_run_name(prefix: str, c_items: List[tuple[str, Any]]) -> str:
+    parts = [prefix]
+    for key, value in c_items:
+        key_short = key.replace(".", "_")
+        val_short = str(value).replace("/", "-").replace(" ", "")
+        parts.append(f"{key_short}--{val_short}")
+    return "__".join(parts)
+
+def get_current_lr(optimizer: torch.optim.Optimizer) -> float:
+    if len(optimizer.param_groups) == 0:
+        raise ValueError("optimizer does not include param groups")
+    return float(optimizer.param_groups[0]["lr"])
+
+
+@dataclass
+class StageIndex:
+    stage_idx: int
+    path: str
+    values: List[Any]
+
+@dataclass
+class GridSearchSpec:
+    base_config: Dict[str, Any]
+    axes: List[StageIndex] = field(default_factory = list)
+    run_name_prefix:str = "grid"
+
+
+def expand_stage_grid(spec: GridSearchSpec) -> List[Dict[str, Any]]:
+    if not spec.axes:
+        cfg = copy.deepcopy(spec.base_config)
+        cfg["resolved_run_name"] = spec.run_name_prefix
+        return [cfg]
+
+    all_value_lists = [axis.values for axis in spec.axes]
+    all_pairs = itertools.product(*all_value_lists)
+
+    runs: List[Dict[str, Any]] = []
+
+    for pair in all_pairs:
+        cfg = copy.deepcopy(spec.base_config)
+        pair_items = []
+
+        for axis, value in zip(spec.axes, pair):
+            stage_idx = int(axis.stage_idx)
+            if stage_idx < 0 or stage_idx >= len(cfg["stages"]):
+                raise IndexError(f"Invalide stage index = {stage_idx}, num stages = {len(cfg['stages'])}")
+            
+            set_nested_in_stage(cfg["stages"][stage_idx], axis.path, value)
+            pair_items.append((f"s{stage_idx}.{axis.path}", value))
+
+        cfg["resolved_run_name"] = make_run_name(spec.run_name_prefix, pair_items)
+        runs.append(cfg)
+
+    return runs
+
+# build optimizer
+def build_optimizer(model: torch.nn.Module, optimizer_cfg: Dict[str, Any]) -> torch.optim.Optimizer:
+    name = optimizer_cfg.get("name", "adamw").lower()
+    lr = float(optimizer_cfg.get("lr", 1e-4))
+    weight_decay =float(optimizer_cfg.get("weight_decay", 0.0))
+
+    params = [p for p in model.parameters() if p.requires_grad]
+
+    if name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    elif name == "adam":
+        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    elif name == "sgd":
+        momentum = float(optimizer_cfg.get("momentum", 0.9))
+        return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+    else:
+        raise ValueError(f"Unsupported optimizer: {name}")
+    
+
+def build_scheduler(optimizer: torch.optim.Optimizer, scheduler_cfg: Optional[Dict[str, Any]]) -> Optional[Any]:
+    if not scheduler_cfg:
+        return None
+    
+    name = scheduler_cfg.get("name", "none").lower()
+
+    if name in {"None", ""}:
+        return None
+    
+    if name == "cosine":
+        t_max = int(scheduler_cfg["T_max"])
+        eta_min = float(scheduler_cfg.get("eta_min", 0.0))
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max = t_max, eta_min = eta_min
+        )
+    elif name == "step":
+        step_size = int(scheduler_cfg["step_size"])
+        gamma = float(scheduler_cfg.get("gamma", 0.1))
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size = step_size, gamma = gamma
+        )
+    elif name == "plateau":
+        mode = scheduler_cfg.get("mode", "min")
+        factor = float(scheduler_cfg.get("factor", 0.1))
+        patience = int(scheduler_cfg.get("patience", 10))
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode = mode, factor = factor, patience = patience
+        )
+    else:
+        raise ValueError(f"Unsupported scheduler: {name}")
+
+
+
+def build_unet(model_cfg: Dict[str, Any]) -> nn.Module:
+    name = model_cfg["unet_builder"]
+
+    if name == "unet":
+        unet_model = UNet3D(in_channels=4, out_channels=4, base_channels = 32).to(device)
+    else:
+        raise ValueError(f"provide model configuration")
+        
+    return unet_model
+
+def build_hybrid_model(run_cfg: Dict[str, Any], device: torch.device):
+    
+    model_cfg = run_cfg["model"]
+
+    base_unet = build_unet(model_cfg).to(device)
+    hybrid_model = build_default_hybrid(unet = base_unet, unet_feat_channels = 256)
+
+    return base_unet, hybrid_model
+
+def get_stage_model(
+    *,
+    trainer_type: str,
+    run_cfg: Dict[str, Any],
+    base_unet = nn.Module,
+    hybrid_model = Optional[nn.Module],
+    device = torch.device
+):
+    if trainer_type == "segmentation":
+        current_model = base_unet
+
+    elif train_type in {"triage", "hybrid"}:
+        """if hybrid_model is None:
+            hybrid_model = build_default_hybrid(unet = base_unet, unet_feat_channels = 256)"""
+
+        current_model = hybrid_model
+    
+    
+    return current_model, hybrid_model
+
+def config_trainable_modules(
+    model : torch.nn.Module,
+    train_modules: List[str],
+    freeze_modules: List[str],
+) -> None:
+    if not isinstance(train_modules, list):
+        train_modules = []
+    if not isinstance(freeze_modules, list):
+        freeze_modules = []
+
+    def _matches(name:str, prefixes: List[str]) -> bool:
+        return any(name == p or name.startswith(p + ".") for p in prefixes)
+    
+    num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("num_trainable:", num_trainable)
+        
+
+    if "all" in train_modules:
+        for name, p in model.named_parameters():
+            p.requires_grad = True
+            if p.requires_grad:
+                print("trainable:", name)
+    else:
+        for name, p in model.named_parameters():
+            p.requires_grad = True
+            if p.requires_grad:
+                print("trainable:", name)
+
+        for name, p in model.named_parameters():
+            if _matches(name, train_modules):
+                p.requires_grad = True
+                
+                if p.requires_grad:
+                    print("trainable:", name)
+
+    for name, p in model.named_parameters():
+        if _matches(name, freeze_modules):
+            p.requires_grad = False
+
+
+def build_trainer(
+    *,
+    trainer_type:str,
+    model,
+    train_loader,
+    val_loader,
+    device,
+    optimizer,
+    scheduler,
+    stage_cfg: dict,
+):
+    
+    if trainer_type == "segmentation":
+        return SemanticSegTrainer(
+            model = model,
             train_loader = train_loader,
             val_loader = val_loader,
-            model_factory = build_vit_model,
-            trainer_factory = build_seg_trainer,
-            trials = trials,
-            num_epochs = 30,
+            optimizer = optimizer,
+            scheduler = scheduler,
+            device = device,
+            lambda_dice=float(stage_cfg.get("loss", {}).get("seg_weight", 1.0)),
+            num_classes = int(stage_cfg.get("num_classes", 4)),
         )
+    
+    elif trainer_type == "triage":
+        return SemanticSegTriage(
+            model = model,
+            train_loader = train_loader,
+            val_loader = val_loader,
+            optimizer = optimizer,
+            device = device,
+            num_classes = int(stage_cfg.get("num_classes", 4)),
+        )
+    
+    elif trainer_type == "hybrid":
+        return SemanticSegHybrid(
+            model = model,
+            train_loader = train_loader,
+            val_loader = val_loader,
+            optimizer = optimizer,
+            scheduler = scheduler,
+            device = device,
+            lambda_cls=float(stage_cfg.get("loss", {}).get("cls_weight", 0.2)),
+            lambda_dice=float(stage_cfg.get("loss", {}).get("seg_weight", 0.1)),
+            num_classes = int(stage_cfg.get("num_classes", 4)),
+            use_amp=bool(stage_cfg.get("use_amp", True)),
+        )
+    else:
+        raise ValueError(f"Unsupport train type: {trainer_type}")
+    
+
+
+# trainer warpper
+def run_stage(
+    *,
+    trainer,
+    trainer_type: str,
+    model: torch.nn.Module,
+    num_epochs:int,
+    logger,
+    optimizer,
+    scheduler,
+    run_name: str,
+    stage_idx: int,
+    stage_name: str,
+    global_epoch_start: int = 0
+):
+    global_epoch = global_epoch_start
+    last_metrics = {}
+
+    for local_epoch in range(1, num_epochs+1):
+        if trainer_type == "segmentation":
+            train_loss, train_dice = trainer.train_one_epoch(local_epoch)
+            val_loss, val_dice = trainer.validate_one_epoch(local_epoch)
         
+            metrics = {
+                "epoch": int(global_epoch),
+                "global_epoch" : int(global_epoch),
+                "stage_idx": int(stage_idx),
+                "stage_name": str(stage_name),
+                "stage_epoch": int(local_epoch),
+                "lr": float(optimizer.param_groups[0]["lr"]),
+                "train_loss":float(train_loss),
+                "train_dice": float(train_dice),
+                "val_loss": float(val_loss),
+                "val_dice": float(val_dice),
+            }
         
-        if ckpt_root is not None:
-            CKPT_ROOT = ckpt_root
+        elif trainer_type == "triage":
+            val_loss, val_auroc, val_auprc = trainer.train_one_epoch(local_epoch)
+
+            metrics = {
+                "epoch": int(global_epoch),
+                "global_epoch" : int(global_epoch),
+                "stage_idx": int(stage_idx),
+                "stage_name": str(stage_name),
+                "stage_epoch": int(local_epoch),
+                "lr": float(trainer.optimizer.param_groups[0]["lr"]),
+                "val_loss": float(val_loss),
+                "val_auroc": float(val_auroc),
+                "val_auprc": float(val_auprc),
+            }
+
+        elif trainer_type == "hybrid":
+            train_stats = trainer.train_one_epoch(local_epoch)
+            val_stats = trainer.validate_one_epoch(local_epoch)
+
+            metrics = {
+                "epoch": int(global_epoch),
+                "global_epoch" : int(global_epoch),
+                "stage_idx": int(stage_idx),
+                "stage_name": str(stage_name),
+                "stage_epoch": int(local_epoch),
+                "lr": float(optimizer.param_groups[0]["lr"]),
+                "train_loss":float(train_stats["avg_train_loss"]),
+                "train_cls_loss": float(train_stats["avg_train_cls"]),
+                "train_dice": float(train_stats["avg_hybrid_dice"]),
+                "train_auroc": float(train_stats["train_auroc"]),
+                "train_auprc": float(train_stats["train_auprc"]),
+                "val_loss": float(val_stats["avg_val_loss"]),
+                "val_cls_loss": float(val_stats["avg_val_cls"]),
+                "val_auroc": float(val_stats["val_auroc"]),
+                "val_auprc": float(val_stats["val_auprc"]),
+            }
+        
         else:
-            raise ValueError(f"ckpt_root must be provided")
-
-        out_csv = Path("..") / "results" / "ablation" / "filename.csv"
-
-
-        if out_csv.exists():
-            print(f"successfully saved: {out_csv}")
-
-            df = create_ablation_dataframe(
-                ckpt_dir = CKPT_ROOT,
-                out_csv = out_csv,
-                device="cpu"
-            )
+            raise ValueError(f"Unsupport train type: {trainer_type}")
         
-        else:
-            raise FileNotFoundError(f"dataframe file does not exist")
+        logger.append_metrics(metrics)
 
-        return df
+        logger.save_last(
+            model = model,
+            epoch = global_epoch,
+            metrics = metrics,
+            optimizer = optimizer,
+            scheduler = scheduler,
+        )
 
-    except ValueError as ve:
-        print(f"[ERROR] Invalid argument: {ve}")
-    except FileNotFoundError as fnf:
-        print(f"[ERROR] Missing file: {fnf}")
-    except Exception as e:
-        print(f"[ERROR] Unexpected issue: {e}")  
+        logger.save_best(
+            model = model,
+            epoch = global_epoch,
+            metrics = metrics,
+            optimizer = optimizer,
+            scheduler = scheduler,
+        )
+
+        if save_every > 0 and (global_epoch + 1) % save_every == 0:
+            logger.save_ckpt(
+                filename=f"epoch_{global_epoch + 1:03d}.pt",
+                model=model,
+                epoch=global_epoch,
+                metrics=metrics,
+                optimizer=optimizer,
+                scheduler=scheduluer,
+                extra={
+                    "kind":"periodic",
+                    "run_name": run_name,
+                    "stage_idx": stage_idx,
+                    "stage_name": stage_name,
+                    "stage_epoch": local_epoch,
+                    "trainer_type": trainer_type,
+                },
+            ),
+
+
+        print(f"[RUN] = {run_name} | [STAGE] = {stage_idx} : {stage_name}")
+
+        last_metrics = metrics
+        global_epoch += 1
+
+    return global_epoch, last_metrics
+    
+
+def run_train(
+    *,
+    run_cfg: Dict[str, Any],
+    train_loader,
+    val_loader,
+    logger,
+    device: str | torch.device,
+    save_every: int = 0
+) -> Dict[str, Any]:
+
+    
+    stages = run_cfg["stages"]
+    global_epoch = 0
+    last_metrics: Dict[str, Any] = {}
+
+
+    for stage_idx, stage_cfg in enumerate(stages):
         
+        stage_name = stage_cfg["name"]
+        stage_epoch = int(stage_cfg["epochs"])
+        trainer_type = stage_cfg["trainer_type"]
+        num_epochs = int(stage_cfg["epochs"])
+
+        train_modules = stage_cfg.get("train_modules", [])
+        freeze_modules = stage_cfg.get("freeze_modules", [])
+        optimizer_cfg = stage_cfg.get("optimizer", {})
+        scheduler_cfg = copy.deepcopy(stage_cfg.get("scheduler", {}))
+        loss_cfg = stage_cfg.get("loss", {})
+
+        base_unet, hybrid_model = build_hybrid_model(run_cfg, device)
+
+        current_model, hybrid_model = get_stage_model(
+            trainer_type = trainer_type,
+            run_cfg = run_cfg,
+            base_unet = base_unet,
+            hybrid_model = hybrid_model,
+            device = device,
+        )
+
+        config_trainable_modules(
+            model = current_model,
+            train_modules = train_modules,
+            freeze_modules = freeze_modules,
+        )
+
+        optimizer = build_optimizer(current_model, optimizer_cfg)
+
+        for i, g in enumerate(optimizer.param_groups):
+            print(f"group {i} param_count =", len(g["params"]))
+
+        scheduler = build_scheduler(optimizer, scheduler_cfg)
+        print(f"scheduler : {scheduler}")
+        scheduler_name = scheduler_cfg.get("name", "none").lower()
+        if scheduler_name == "cosine" and "T_max" not in scheduler_cfg:
+            scheduler_cfg["T_max"] = num_epochs
+
+        trainer = build_trainer(
+            trainer_type = trainer_type,
+            model = current_model,
+            train_loader = train_loader,
+            val_loader = val_loader,
+            device = device,
+            optimizer = optimizer,
+            scheduler = scheduler,
+            stage_cfg = stage_cfg,
+        )
+
+        global_epoch, last_metrics = run_stage(
+            trainer=trainer,
+            trainer_type=trainer_type,
+            model = current_model,
+            num_epochs = num_epochs,
+            logger = logger,
+            optimizer = optimizer,
+            scheduler = scheduler,
+            run_name = run_cfg["resolved_run_name"],
+            stage_idx =stage_idx,
+            stage_name = stage_name,
+            global_epoch_start = global_epoch
+        )
+    
+    return {
+        "run_name": run_cfg["resolved_run_name"],
+        "total_epochs": int(global_epoch),
+        "final_metrics": last_metrics
+    }
+
+def stagewise_grid_search(
+    *,
+    spec: GridSearchSpec,
+    logger_cls: Callable[..., Any],
+    train_loader,
+    val_loader,
+    root_dir: str | Path,
+    device: str | torch.device,
+    save_every: int = 0,
+    best_metrics: Optional[List[tuple[str, str]]] = None
+) -> List[Dict[str, Any]]:
+    runs = expand_stage_grid(spec)
+    summary_list: List[Dict[str, Any]] = []
+
+    for run_idx, run_cfg in enumerate(runs):
+        run_name = run_cfg["resolved_run_name"]
+        print(f"[GRID SEARCH: starting run {run_idx+1} / {len(runs)}]: {run_name}")
+
+        logger = logger_cls(
+            root_dir=root_dir,
+            exp_name = run_name,
+            config = run_cfg,
+        )
+
+
+        if best_metrics is not None:
+            for metric_name, mode in best_metrics:
+                logger.register_best_metric(metric_name, mode = mode)
+
+        summary = run_train(
+            run_cfg = run_cfg,
+            train_loader = train_loader,
+            val_loader = val_loader,
+            logger = logger,
+            device = device,
+            save_every = save_every,
+        )
+    
+        summary_list.append(summary)
+    
+    return summary_list
+
 
 if __name__ == "__main__":
 
+
+
+
+    
     print("torch:", torch.__version__)
     print("torch cuda:", torch.version.cuda)
     print("available:", torch.cuda.is_available())
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    grid_dir = Path("../results/ablation")
-    grid_dir.mkdir(parents=True, exist_ok=True)
-
-    ckpt_dir = Path("../results/checkpoints")
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     data_dir = "../dataset/msd/Task01_BrainTumour"
     json_path = os.path.join(data_dir, "dataset.json")
@@ -406,9 +684,10 @@ if __name__ == "__main__":
 
     cache_dir = Path(cache_dir)
 
-    CSV_ROOT = Path("..") / "results" / "ablation" / "vit_grid_search.csv"
-    CKPT_ROOT = Path("..") / "results" / "checkpoints" / "vit_grid_search"
-
+    root_dir = "./experiments"
+    
+    if not os.path.exists(root_dir):
+        os.makedirs(os.path.dirname(root_dir) or ".", exist_ok=True)
 
     train_loader, val_loader, test_data_list = msd_datasets_and_loaders(
         json_path=json_path,
@@ -419,49 +698,115 @@ if __name__ == "__main__":
         seed=42,
     )
 
-    try:
-        results = grid_search_vit(
-            out_csv = CSV_ROOT,
-            ckpt_path = CKPT_ROOT,
-            device = device,
-            train_loader = train_loader,
-            val_loader = val_loader,
-            model_factory = build_vit_model,
-            trainer_factory = build_seg_trainer,
-            seeds = (42, 43),
-            grid = ViTGrid(
-                patch_size = (4,), # (4, 8)
-                embed_dim = (64, 128),
-                depth = (2, 4), # (2, 4)
-                num_heads = (4, 8),
-                dropout = (0.0, 0.01),
-                mlp_ratio = (2.0, 4.0),
-                lr = (1e-4, 3e-4),
-                weight_decay = (1e-2,), # (1e-2, 1e-5)
-                lambda_dice = (1.0,),
-                use_amp = (True,)
+    spec = GridSearchSpec(
+        base_config = {
+            "model": {
+                "unet_builder": "unet",
+                "return_feat": False,
+                "vit": {
+                    "in_channels": 256,
+                    "embed_dim": (48, 96, 192),
+                    "depths": (2, 2, 2),
+                    "triage_num": 256,
+                    "sr_ratios": (2, 1, 1),
+                    "block_type": "sr",
+                    "triage_pool": "gap",
+                    "patch_size": 4,
+                },
+            },
+            "stages": [
+                {
+                    "name": "stageA_seg",
+                    "trainer_type": "segmentation",
+                    "epochs": 5,
+                    "train_modules": ["unet"],
+                    "freeze_modules": ["vit"],
+                    "optimizer": {
+                        "name": "adamw",
+                        "lr": 1e-4,
+                        "weight_decay": 1e-2,
+                    },
+                    "scheduler": {
+                        "name": "step",
+                        "step_size": 6,
+                    },
+                    "loss": {
+                        "seg_weight": 1.0,
+                    },
+                    "num_classes": 4,
+                },
+                {
+                    "name": "stageB_triage",
+                    "trainer_type": "triage",
+                    "epochs": 3,
+                    "train_modules": ["vit"],
+                    "freeze_modules": ["unet"],
+                    "optimizer": {
+                        "name": "adamw",
+                        "lr": 1e-4,
+                        "weight_decay": 1e-2,
+                    },
+                    "loss": {
+                        "cls_weight": 1.0,
+                    },
+                    "num_classes": 4,
+                },
+                {
+                    "name": "stageC_hybrid",
+                    "trainer_type": "hybrid",
+                    "epochs": 10,
+                    "train_modules": ["all"],
+                    "freeze_modules": [],
+                    "optimizer": {
+                        "name": "adamw",
+                        "lr": 5e-5,
+                        "weight_decay": 1e-2,
+                    },
+                    "scheduler": {
+                        "name": "step",
+                        "step_size": 6,
+                    },
+                    "loss": {
+                        "seg_weight": 1.0,
+                        "cls_weight": 0.2,
+                    },
+                    "num_classes": 4,
+                    "use_amp": True,
+                },
+            ],
+        },
+        axes = [
+            StageIndex(
+                stage_idx = 0,
+                path = "optimizer.lr",
+                values = [5e-5, 3e-5],
             ),
-            num_epochs = 3,
-        )
-        
+            StageIndex(
+                stage_idx = 1,
+                path = "optimizer.lr",
+                values = [0.2, 0.5],
+            ),
+            StageIndex(
+                stage_idx = 2,
+                path = "loss.cls_weight",
+                values = [0.2, 0.5],
+            ),
+        ],
+        run_name_prefix = "logger",
+    )
 
-        out_csv = Path("..") / "results" / "ablation" / "filename.csv"
-
-        if out_csv.exists():
-            print(f"successfully saved: {out_csv}")
-            
-            df = create_ablation_dataframe(
-                ckpt_dir = CKPT_ROOT,
-                out_csv = out_csv,
-                device="cpu"
-            )
-        
-        else:
-            raise FileNotFoundError(f"dataframe file does not exist")
-
-    except ValueError as ve:
-        print(f"[ERROR] Invalid argument: {ve}")
-    except FileNotFoundError as fnf:
-        print(f"[ERROR] Missing file: {fnf}")
-    except Exception as e:
-        print(f"[ERROR] Unexpected issue: {e}")
+    train = stagewise_grid_search(
+        spec = spec,
+        logger_cls = ExperimentLogger,
+        train_loader = train_loader,
+        val_loader = val_loader,
+        root_dir = root_dir,
+        device = device,
+        save_every = 5,
+        best_metrics=[
+            ("val_loss", "min"),
+            ("val_dice", "min"),
+            ("val_auroc", "min"),
+            ("val_auprc", "min")
+        ]
+    )
