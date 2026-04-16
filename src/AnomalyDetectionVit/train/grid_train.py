@@ -51,6 +51,7 @@ class ExperimentLogger:
     exp_name: str
     config: Dict[str, Any]
     resume: bool = False
+    filename: str = field(init=False)
     run_dir: Path = field(init=False)
     ckpt_dir: Path = field(init=False)
     metrics_path: Path = field(init=False)
@@ -80,7 +81,7 @@ class ExperimentLogger:
             json.dump(obj, f, ensure_ascii=False, indent=2)
 
     def append_metrics(self, row:Dict[str, Any]) -> None:
-        with self.metrics_path.oepn("a", encoding="utf-8") as f:
+        with self.metrics_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     
     def register_best_metric(self, metric_name:str, mode:str) -> None:
@@ -91,13 +92,15 @@ class ExperimentLogger:
         path = self.ckpt_dir / filename
         ckpt_path = path
         ckpt = save_ckpt_metric(
-            ckpt_path=ckpt_path,
+            path=ckpt_path,
             model=model,
             optimizer=optimizer,
-            scheduler=ccheduler,
+            scheduler=scheduler,
             epoch=int(epoch),
             metrics=metrics,
         )
+
+        torch.save(ckpt, path)
 
         return path
     
@@ -113,10 +116,10 @@ class ExperimentLogger:
         )
 
 
-    def save_best(self, model: torch.nn.Module, epoch: int, metrics: Dict[str, Any], optimizer:Optional[torch.optim.Optimizer], scheduler:Optional[Any]):
+    def save_best(self, filename:str, model: torch.nn.Module, epoch: int, metrics: Dict[str, Any], optimizer:Optional[torch.optim.Optimizer], scheduler:Optional[Any]):
         saved = {}
 
-        for metric_name, tracker in self.best_tracker.items():
+        for metric_name, tracker in self.best_trackers.items():
             value = metrics.get(metric_name)
             if not isinstance(value, (int, float)):
                 continue
@@ -492,6 +495,7 @@ def run_stage(
         logger.append_metrics(metrics)
 
         logger.save_last(
+            filename=f"epoch_{global_epoch + 1:03d}_save_last.pt",
             model = model,
             epoch = global_epoch,
             metrics = metrics,
@@ -500,6 +504,7 @@ def run_stage(
         )
 
         logger.save_best(
+            filename=f"epoch_{global_epoch + 1:03d}_save_best.pt",
             model = model,
             epoch = global_epoch,
             metrics = metrics,
