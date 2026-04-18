@@ -2,8 +2,8 @@ from pathlib import Path
 import json
 from monai.data import load_decathlon_datalist, check_missing_files
 
-root = Path("../dataset/msd/Task01_BrainTumour")
-json_path = root / "dataset.json"
+root = Path("")
+json_path = root / "file.json"
 
 print("json exists:", json_path.exists())
 assert json_path.exists(), f"Missing: {json_path}"

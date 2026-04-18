@@ -55,7 +55,7 @@ def download_and_extract_msd_task(task_name: str, local_dir: str) -> str:
 
     images_tr = extract_dir / "imagesTr"
     labels_tr = extract_dir / "labelsTr"
-    dataset_json = extract_dir / "dataset.json"
+    dataset_json = extract_dir / "files.json" # your dataset name
 
     print("imagesTr exists :", images_tr.exists())
     print("labelsTr exists :", labels_tr.exists())

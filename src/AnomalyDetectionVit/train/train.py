@@ -74,10 +74,10 @@ def msd_datasets_and_loaders(
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     
-    root_dir = Path("../dataset/msd/Task01_BrainTumour")
+    root_dir = Path("")
     root_dir.mkdir(parents=True, exist_ok=True)
 
-    DATA_ROOT = "../dataset/msd"
+    DATA_ROOT = ""
 
     TRAIN_CASES = sorted([p for p in glob.glob(os.path.join(DATA_ROOT, '*')) if os.path.isdir(p)])
     cases = TRAIN_CASES
@@ -97,7 +97,7 @@ def msd_datasets_and_loaders(
 
     # debug
     if debug == True:
-        img = nib.load("../dataset/msd/Task01_BrainTumour/imagesTr/BRATS_442.nii.gz")
+        img = nib.load("")
         
         print(img.shape)
 
@@ -106,7 +106,7 @@ def msd_datasets_and_loaders(
         
         
         print(train_data_list[0])
-        # {'image': 'imagesTr/BRATS_001.nii.gz', 'label': 'labelsTr/BRATS_001.nii.gz'}  
+        # {'image': 'BRATS_001.nii.gz', 'label': 'labelsTr/BRATS_001.nii.gz'}  
 
         missing = check_missing_files(train_data_list, keys=("image", "label"))
         print("num missing files:", len(missing))
@@ -422,7 +422,6 @@ def build_default_hybrid(unet:nn.Module, unet_feat_channels: int, triage_embed_d
 
 
 class SemanticSegTrainer:
-    ckpt_model_attr = "train_model"
     def __init__(self, model, train_loader, val_loader, optimizer, scheduler, device, lambda_dice = 1.0, lr = 1e-4, weight_decay = 1e-2, num_classes = 4):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -560,7 +559,6 @@ class SemanticSegTrainer:
                 print(type(epoch), type(avg_loss))
 
 class SemanticSegTriage:
-    ckpt_model_attr = "triage_model"
     def __init__(self, triage_model, train_loader, val_loader, device, lr=1e-4, weight_decay=0.01, num_classes = 4):
         self.triage_model = triage_model.to(device)
         self.train_loader = train_loader
@@ -731,7 +729,7 @@ class SemanticSegTriage:
 
 
 class SemanticSegHybrid:
-    def __init__(self, hybrid_model, train_loader, val_loader, optimizer, device, lambda_cls=0.2, lambda_dice=1.0, lr_unet=1e-5, lr_vit=1e-4, weight_decay=0.01, num_classes=4, num_epochs:int = 1, use_amp = True):
+    def __init__(self, hybrid_model, train_loader, val_loader, optimizer, scheduler, device, lambda_cls=0.2, lambda_dice=1.0, lr_unet=1e-5, lr_vit=1e-4, weight_decay=0.01, num_classes=4, num_epochs:int = 1, use_amp = True):
         self.hybrid_model = hybrid_model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -1005,8 +1003,8 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    data_dir = "../dataset/msd/Task01_BrainTumour"
-    json_path = os.path.join(data_dir, "dataset.json")
+    data_dir = ""
+    json_path = os.path.join(data_dir, "file.json")
 
     cache_dir = os.path.join(data_dir, "persistent_cache")
     os.makedirs(cache_dir, exist_ok=True)

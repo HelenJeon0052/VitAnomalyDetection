@@ -337,8 +337,8 @@ def execution_ablation_pt():
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    CSV_ROOT = Path("..") / "results" / "ablation" / "vit_ablation.csv"
-    CKPT_ROOT = Path("..") / "results" / "ablation" / "vit_ablation"
+    CSV_ROOT = Path("..") / "path" / "to" / "vit_ablation.csv"
+    CKPT_ROOT = Path("..") / "path" / "to" / "vit_ablation"
 
     try:
         results = run_vit_trials(
@@ -359,7 +359,7 @@ def execution_ablation_pt():
         else:
             raise ValueError(f"ckpt_root must be provided")
 
-        out_csv = Path("..") / "results" / "ablation" / "filename.csv"
+        out_csv = Path("..") / "path" / "to" / "filename.csv"
 
 
         if out_csv.exists():
@@ -392,22 +392,22 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    grid_dir = Path("../results/ablation")
+    grid_dir = Path("")
     grid_dir.mkdir(parents=True, exist_ok=True)
 
-    ckpt_dir = Path("../results/checkpoints")
+    ckpt_dir = Path("")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    data_dir = "../dataset/msd/Task01_BrainTumour"
-    json_path = os.path.join(data_dir, "dataset.json")
+    data_dir = ""
+    json_path = os.path.join(data_dir, "file.json")
 
     cache_dir = os.path.join(data_dir, "persistent_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
     cache_dir = Path(cache_dir)
 
-    CSV_ROOT = Path("..") / "results" / "ablation" / "vit_grid_search.csv"
-    CKPT_ROOT = Path("..") / "results" / "checkpoints" / "vit_grid_search"
+    CSV_ROOT = Path("..") / "path" / "to" / "vit_grid_search.csv"
+    CKPT_ROOT = Path("..") / "path" / "to" / "vit_grid_search"
 
 
     train_loader, val_loader, test_data_list = msd_datasets_and_loaders(
@@ -445,7 +445,7 @@ if __name__ == "__main__":
         )
         
 
-        out_csv = Path("..") / "results" / "ablation" / "filename.csv"
+        out_csv = Path("..") / "path" / "to" / "filename.csv"
 
         if out_csv.exists():
             print(f"successfully saved: {out_csv}")

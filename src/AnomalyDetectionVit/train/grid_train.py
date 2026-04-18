@@ -312,10 +312,12 @@ def get_stage_model(
     hybrid_model = Optional[nn.Module],
     device = torch.device
 ):
+    
     if trainer_type == "segmentation":
         current_model = base_unet
 
-    elif train_type in {"triage", "hybrid"}:
+    elif trainer_type in {"triage", "hybrid"}:
+
         """if hybrid_model is None:
             hybrid_model = build_default_hybrid(unet = base_unet, unet_feat_channels = 256)"""
 
@@ -390,17 +392,16 @@ def build_trainer(
     
     elif trainer_type == "triage":
         return SemanticSegTriage(
-            model = model,
+            triage_model = model,
             train_loader = train_loader,
             val_loader = val_loader,
-            optimizer = optimizer,
             device = device,
             num_classes = int(stage_cfg.get("num_classes", 4)),
         )
     
     elif trainer_type == "hybrid":
         return SemanticSegHybrid(
-            model = model,
+            hybrid_model = model,
             train_loader = train_loader,
             val_loader = val_loader,
             optimizer = optimizer,
@@ -429,7 +430,8 @@ def run_stage(
     run_name: str,
     stage_idx: int,
     stage_name: str,
-    global_epoch_start: int = 0
+    global_epoch_start: int = 0, 
+    save_every: int = 0,
 ):
     global_epoch = global_epoch_start
     last_metrics = {}
@@ -453,7 +455,7 @@ def run_stage(
             }
         
         elif trainer_type == "triage":
-            val_loss, val_auroc, val_auprc = trainer.train_one_epoch(local_epoch)
+            val_loss, val_auroc, val_auprc = trainer.triage_one_epoch(local_epoch)
 
             metrics = {
                 "epoch": int(global_epoch),
@@ -681,8 +683,8 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    data_dir = "../dataset/msd/Task01_BrainTumour"
-    json_path = os.path.join(data_dir, "dataset.json")
+    data_dir = ""
+    json_path = os.path.join(data_dir, "file.json")
 
     cache_dir = os.path.join(data_dir, "persistent_cache")
     os.makedirs(cache_dir, exist_ok=True)

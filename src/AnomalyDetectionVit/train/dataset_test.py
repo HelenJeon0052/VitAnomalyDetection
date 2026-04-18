@@ -70,11 +70,10 @@ def msd_datasets_and_loaders(
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     
-    root_dir = Path("../dataset/msd")
+    root_dir = Path("")
     root_dir.mkdir(parents=True, exist_ok=True)
 
-    DATA_ROOT = "../dataset/msd"
-
+    DATA_ROOT = root_dir
     TRAIN_CASES = sorted([p for p in glob.glob(os.path.join(DATA_ROOT, '*')) if os.path.isdir(p)])
     cases = TRAIN_CASES
 
@@ -95,11 +94,11 @@ def msd_datasets_and_loaders(
 
     # debug
     if debug == True:
-        img = nib.load("../dataset/msd/Task01_BrainTumour/imagesTr/BRATS_442.nii.gz")
+        img = nib.load("")
         
         print(img.shape)
         print(train_data_list[0])
-        # {'image': 'imagesTr/BRATS_001.nii.gz', 'label': 'labelsTr/BRATS_001.nii.gz'}
+        # {'image': 'BRATS_001.nii.gz', 'label': 'labelsTr/BRATS_001.nii.gz'}
 
         files = train_data_list.copy()
         random.shuffle(files)
@@ -282,8 +281,8 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    data_dir = Path("../dataset/msd/Task01_BrainTumour")
-    json_path = os.path.join(data_dir, "dataset.json")
+    data_dir = Path("")
+    json_path = os.path.join(data_dir, "file.json")
 
     print("task dir exists:", data_dir.exists(), data_dir.is_dir())
 
