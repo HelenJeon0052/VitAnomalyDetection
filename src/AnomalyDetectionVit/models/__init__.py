@@ -3,7 +3,7 @@ from .attention import SelfAttention
 from .vit_3d import Light3DVit
 
 
-from .unet3d import UNet3D, soft_dice_loss, dice_score 
+from .unet3d import UNet3D
 from .decoder import MLPDecoder
 from .encoder import HierarchicalEncoder3D
 

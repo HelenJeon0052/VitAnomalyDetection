@@ -13,7 +13,7 @@ class ViT3DPatchEmbed(nn.Module):
     def __init__(self, patch_size=4, in_channels=1, embed_dim=128):
         super().__init__()
         self.patch_size = patch_size
-        print("patch_size _ init:", self.patch_size)
+        """print("patch_size _ init:", self.patch_size)"""
         self.proj = nn.Conv3d(in_channels=in_channels, out_channels=embed_dim, kernel_size=3, stride=2, padding=1, bias=False)
 
     def forward(self, x):
@@ -43,7 +43,7 @@ class PatchMerging3D(nn.Module):
     def forward(self, feat):
         # feat : [B, C, D, L, W]
         feat = self.conv(feat)
-        print(f'feat.shape: {feat.shape}') # [B, out, D/2, L/2, W/2]
+        """print(f'feat.shape: {feat.shape}')""" # [B, out, D/2, L/2, W/2]
         B, C, D, L, W = feat.shape
         tokens = feat.flatten(2).transpose(1, 2)
         tokens = self.norm(tokens)

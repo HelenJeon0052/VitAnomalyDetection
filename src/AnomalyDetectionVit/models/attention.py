@@ -69,7 +69,7 @@ class SelfAttention(nn.Module):
 
         out = attn @ v
         out = out.transpose(1, 2).reshape(B, T, D)
-        print(f'out.shape: {out.shape}')
+        """print(f'out.shape: {out.shape}')"""
 
 
 
@@ -163,7 +163,7 @@ class SRMultiheadAttention3D(nn.Module):
         Dd, Ll, Ww = grid_shape
 
         q = self.q(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        print(f'q.shape: {q.shape}')
+        """print(f'q.shape: {q.shape}')"""
 
         if self.sr_ratio > 1.0:
             # reshape tokens back to 3D feature map

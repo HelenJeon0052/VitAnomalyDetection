@@ -40,7 +40,7 @@ class Light3DVit(nn.Module):
                  depths=(2, 2, 2), # (2, 2, 2, 2)
                  sr_ratios=(2, 1, 1), # (4, 2, 1, 1)
                  block_type='sr',
-                 ode_mode='strang',
+                 ode_mode='lie',
                  ode_steps_attn=2,
                  ode_steps_mlp=1,
                  ode_steps_fric=1,
@@ -82,7 +82,7 @@ class Light3DVit(nn.Module):
     
 
     def _pool3d(self, f4: torch.Tensor) ->  torch.Tensor:
-        print(f"shapes in _pool3d: {f4}")
+        """print(f"shapes in _pool3d: {f4}")"""
         
         if isinstance(f4, (list, tuple)):
             raise TypeError(f"Expected a single tensor for f4, but got {type(f4)}")

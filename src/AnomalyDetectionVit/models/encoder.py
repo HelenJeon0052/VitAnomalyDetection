@@ -27,7 +27,7 @@ class HierarchicalEncoder3D(nn.Module):
                  ode_steps_mlp=1,
                  ode_steps_fric=1,
                  use_friction=True,
-                 ode_mode="strang",
+                 ode_mode="lie",
                  friction_position='mid',
                  patch_size=4):
         super().__init__()
@@ -103,7 +103,7 @@ class HierarchicalEncoder3D(nn.Module):
         return feat
     
     def forward(self, x):
-        print("input:", x.shape)
+        """print("input:", x.shape)"""
 
         patch_out = self.patch_embed(x)
         feats = []
@@ -116,7 +116,7 @@ class HierarchicalEncoder3D(nn.Module):
         else:
             raise ValueError("ViTPatchEmbed must return (tok, grid, feat) or (tok, grid)")
 
-        print("after patch_embed:", feat.shape, "grid:", grid)
+        """print("after patch_embed:", feat.shape, "grid:", grid)"""
 
         for i, stage_blocks in enumerate(self.stages):
             if i > 0:
@@ -131,7 +131,7 @@ class HierarchicalEncoder3D(nn.Module):
                 else:
                     raise ValueError("PatchMerging must return (tok, grid, feat) or (tok, grid)")
 
-                print(f"after downs[{i - 1}]:", feat.shape, "grid:", grid)
+                """print(f"after downs[{i - 1}]:", feat.shape, "grid:", grid)"""
 
             for blk in stage_blocks:
                 if isinstance(blk, (AttentionField3D, MLPField, FrictionField)):
@@ -142,9 +142,9 @@ class HierarchicalEncoder3D(nn.Module):
                     tok = blk(tok, grid)
 
             feat = self._tokens_to_feat(tok, grid, self.has_cls_token)
-            print(f"after stage[{i}]:", feat.shape, "grid:", grid)
+            """print(f"after stage[{i}]:", feat.shape, "grid:", grid)"""
             feats.append(feat)
 
         feat_last = feats[-1]
-        print([f.shape for f in feats])
+        """print([f.shape for f in feats])"""
         return feat_last, feats

@@ -2,13 +2,6 @@
 key ideas:
 1. 3D UNet is a convolutional encoder-decoder with skip connections
 2. map : volume > dense per-voxel prediction (segmentation/logits)
-3. not inherently a diffusion model
-
-Run:
-    python unet3d.py --help
-    python unet3d.py --device cpu --steps 50
-    python unet3d.py --device cuda --steps 10000
-
 """
 
 
@@ -293,86 +286,3 @@ class UNet3D(nn.Module):
         seg_logits, _, _ = self.forward_full(x)
 
         return seg_logits
-    
-    """def forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
-        feat, skips = self.encode(x)
-
-        return feat, list(skips)
-    
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        feat, _ = self.encode(x)
-        print(f"forward features output shape: {feat.shape}")
-
-        return feat
-
-    def forward_full(self, x: torch.Tensor) -> torch.Tensor:
-        feat, skips = self.encode(x)
-
-        l = feat
-
-        skips = list(skips)
-
-        skips.pop()
-
-        for up, dec in zip(self.ups, self.decs):
-            skip = skips.pop()
-            l = up(l, size=skip.shape[-3:])
-            l = torch.cat([l, skip], dim = 1)
-            l = dec(l)
-
-        seg_logits = self.out(l)
-        print("l:", l.shape)
-
-        return seg_logits, l
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seg_logits, _ = self.forward_full(x)
-            
-        return seg_logits"""
-
-    
-# ---------------------------------------
-# Losses
-# ---------------------------------------
-
-def soft_dice_loss(logits: torch.Tensor, targets: torch.Tensor, n_dim = 2 , num_classes = 4, eps: float = 1e-6) -> torch.Tensor:
-    """
-    for train
-    logits : [b, 1, D, L, W]
-    targets: [b, 1, D, L, W] in {0, 1}
-    """
-
-
-    
-    probs = torch.sigmoid(logits)
-    probs = probs.flatten(n_dim)
-    targets = F.one_hot(targets, num_classes=num_classes).permute(0, 4, 1, 2, 3).float()
-    targets = targets.flatten(n_dim)
-    
-    inter = (probs * targets).sum(dim=n_dim)
-    denom = probs.sum(dim=n_dim) + targets.sum(dim=n_dim)
-    dice = (2.0 * inter + eps) / (denom + eps)
-
-    if probs.ndim == 1:
-        dice_mean = 1.0 - dice.mean()
-    else:
-        dice_mean = 1.0 - dice[:, 1:].mean() 
-    
-    return dice_mean
-
-def dice_score(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) -> float:
-    """
-    for eval
-    compute dice score for evaluation
-    """
-    probs = torch.sigmoid(logits)
-    preds = probs.float()
-    
-    preds = preds.flatten(1)
-    targets = targets.flatten(1)
-    
-    inter = (preds * targets).sum(dim=1)
-    denom = preds.sum(dim=1) + targets.sum(dim=1)
-    dice = (2.0 * inter + eps) / (denom + eps)
-    
-    return float(dice.mean())
