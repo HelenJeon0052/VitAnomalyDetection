@@ -32,15 +32,16 @@ def dice_score(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) -
     for eval
     compute dice score for evaluation
     """
-    probs = torch.sigmoid(logits)
+    probs = torch.sigmoid(logits.float())
     preds = probs.float()
     
     preds = preds.flatten(1)
     targets = targets.flatten(1)
-    
-    intersection = (preds * targets).sum(dim=1)
-    denom = preds.sum(dim=1) + targets.sum(dim=1)
-    dice = (2.0 * intersection + eps) / (denom + eps)
+
+    dims = tuple(range(1, preds.ndim))
+    intersection = (preds * targets).sum(dim=dims)
+    denom = preds.sum(dim=1) + targets.sum(dim=dims)
+    dice = (2.0 * intersection + 1.0) / (denom + 1.0).clamp(min=1e-12)
     
     if probs.ndim == 1:
         dice_mean = 1.0 - dice.mean()
@@ -67,7 +68,7 @@ def soft_dice_loss(logits: torch.Tensor, targets: torch.Tensor, y_valid_mask: to
     assert targets.shape == (logits.shape[0], logits.shape[2], logits.shape[3], logits.shape[4]), f"expected targets of shape [b, D, L, W], got {tuple(targets.shape)}"
     assert y_valid_mask.shape == (logits.shape[0], logits.shape[2], logits.shape[3], logits.shape[4]), f"expected valid mask of shape [b, D, L, W], got {tuple(y_valid_mask.shape)}"
 
-    probs = torch.softmax(logits, dim=1)
+    probs = torch.softmax(logits.float(), dim=1)
 
     targets_safe = targets.clone()
     targets_safe[targets_safe == ignore_idx] = 0
@@ -78,6 +79,10 @@ def soft_dice_loss(logits: torch.Tensor, targets: torch.Tensor, y_valid_mask: to
     for c in range(start, K):
         pred_c = probs[:, c]
         target_c = (targets_safe == c).float()
+
+        if y_valid_mask is not None:
+            pred_c = pred_c * y_valid_mask.float()
+            target_c = target_c * y_valid_mask.float()
 
         loss_c = dice_loss(pred = pred_c, target = target_c, mask=y_valid_mask)
         losses.append(loss_c)

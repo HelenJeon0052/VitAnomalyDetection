@@ -19,7 +19,7 @@ class RKSolver(nn.Module):
         k3 = self.vf(t + .5 * dt, x + .5 * dt * k2, grid_shape)
         k_f = self.vf(t + dt, x + dt * k3, grid_shape)
         k = x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k_f)
-        print(f'k: {k}')
+        """print(f'k: {k}')"""
 
         return k
 
